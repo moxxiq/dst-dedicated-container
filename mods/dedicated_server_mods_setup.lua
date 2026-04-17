@@ -1,0 +1,15 @@
+-- dedicated_server_mods_setup.lua
+-- Lists Workshop mod IDs for the server to auto-download/update at startup.
+-- This file gets mounted into the DST server install directory at:
+--   /home/ubuntu/dst/mods/dedicated_server_mods_setup.lua
+--
+-- For each mod you want enabled, you need entries in BOTH places:
+--   1) Here  — ServerModSetup("<id>")         (tells DST to download it)
+--   2) In  ./saves/<ClusterName>/Master/modoverrides.lua  (tells DST to enable + configure it)
+--
+-- Find mod IDs on the Workshop URL:
+--   https://steamcommunity.com/sharedfiles/filedetails/?id=378160973  → "378160973"
+
+-- ServerModSetup("378160973")   -- Global Positions
+-- ServerModSetup("458140854")   -- Show Me
+-- ServerModSetup("2189004162")  -- Insight (advanced tooltips)

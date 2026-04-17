@@ -1,0 +1,30 @@
+# Compose is optional convenience. See run-steamcmd.sh for a compose-free equivalent.
+# Strategy: named volumes for opaque state (steam auth, server install),
+# bind mount for the save folder the user may want to edit / back up / swap.
+
+services:
+  steamcmd:
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+    image: local/steamcmd:latest
+    platform: linux/amd64
+    container_name: steamcmd
+    stdin_open: true
+    tty: true
+    volumes:
+      - steamcmd-home:/home/ubuntu/.local/share/Steam  # Steam auth sentry + steamcmd install (named)
+      - dst-server:/home/ubuntu/dst             # DST dedicated server install (named)
+      # :U tells Podman to chown the bind mount to container UID 1000.
+      # Without :U, writes from the container fail with "Permission denied".
+      # (Docker compose ignores :U — on Docker, chown the host dir manually: chown -R 1000:1000 ./saves)
+      - ./saves:/home/ubuntu/.klei:U            # DST saves — BIND MOUNT so you can edit on host
+      - ./mods:/home/ubuntu/dst-mods:U          # mod manifest (dedicated_server_mods_setup.lua)
+    # Default command is `steamcmd +quit` (smoke test).
+    # Interactive shell:   podman compose run --rm steamcmd bash
+    # Anonymous steamcmd:  podman compose run --rm steamcmd steamcmd +login anonymous +quit
+
+volumes:
+  steamcmd-home:
+  dst-server:
