@@ -1,6 +1,10 @@
-# SteamCMD + DST container — usage
+# SteamCMD + Don't Starve Together server
 
-This container runs SteamCMD (currently) and will run the Don't Starve Together dedicated server (next step). The files in this repo are **host-universal**: same Dockerfile, compose, and scripts work on Linux and macOS. The container itself is x86_64 only — on ARM Macs it runs via QEMU emulation (works, just slower for world-gen and mod downloads).
+Container for running SteamCMD and (next step) the Don't Starve Together dedicated server.
+
+- Built for deployment on **x86_64 Linux** (VPS or home box) — that's the real target.
+- On **macOS Apple Silicon** the files still build/mount/launch via Podman, but Rosetta on the current kernel crashes Steam binaries (documented below); so Mac is for container plumbing validation, not actual Steam operations.
+- Same Dockerfile, compose, and scripts work on both — only runtime behavior differs.
 
 ---
 
@@ -145,7 +149,54 @@ mv saves/qkation-cooperative saves/qkation-cooperative.archived
 rsync -av --delete saves/ user@vps:/home/user/steamCMD/saves/
 ```
 
-**Permissions (Linux only):** if you copy a saves folder onto a Linux host from elsewhere, run `sudo chown -R 1000:1000 saves/` before launching — DST inside the container runs as UID 1000. On macOS + Podman, the `:U` mount flag handles this automatically.
+### Host-side permission gotcha (unzip / extract into `saves/`)
+
+`:U` in the bind mount chowns `saves/` to the container's UID 1000 on every launch. That chown is reflected back to the host through virtiofs (macOS) or directly (Linux rootless), and your login user may no longer own the folder afterwards. You'll then hit `permission denied` extracting a zip/tar into it.
+
+**Symptom:**
+```
+$ unzip backup.zip -d saves/
+checkdir: cannot create extraction directory: saves/...
+           Permission denied
+```
+
+**Diagnose:**
+```bash
+ls -la saves/
+ls -la saves/qkation-cooperative/
+```
+
+**Fix (take ownership back, then extract):**
+```bash
+# macOS
+sudo chown -R "$(whoami):staff" saves/
+chmod -R u+rwX saves/
+
+# Linux
+sudo chown -R "$(whoami):$(id -gn)" saves/
+chmod -R u+rwX saves/
+
+# then extract
+unzip -o backup.zip -d saves/
+# or
+tar xzf backup.tgz -C saves/
+```
+
+**Prevent it coming back** (two options):
+1. Drop `:U` from the bind mount and chown once to UID 1000:
+   ```bash
+   sudo chown -R 1000:1000 saves/   # Linux or macOS Terminal — Finder can't do this
+   ```
+   Then edit `docker-compose.yml` / `run-steamcmd.sh` to remove `:U` from the `saves` line.
+2. Always drop files into `saves/` **through the container** (doesn't fight the chown):
+   ```bash
+   podman run --rm -i --platform=linux/amd64 \
+     -v "$(pwd)/saves:/home/ubuntu/.klei:U" \
+     local/steamcmd:latest \
+     bash -c 'cd /home/ubuntu/.klei && unzip -o /dev/stdin' < backup.zip
+   ```
+
+On the Linux VPS this hurts less — a one-time `sudo chown -R 1000:1000 saves/` after any host-side extract is enough.
 
 ---
 
@@ -239,8 +290,9 @@ Works but emulated. Fine for 1-4 players, noticeably slower world-gen and mod lo
 
 | Symptom | Fix |
 |---|---|
-| `permission denied` writing to `saves/` | Linux: `sudo chown -R 1000:1000 saves/`. Podman: ensure `:U` is on the mount. |
-| `Exiting on SPEW_ABORT` on Mac | First-run QEMU quirk — re-run the same command. |
+| `permission denied` unzipping / extracting into `saves/` | `:U` chowned it away from your login user. See "Host-side permission gotcha" above. |
+| `Exiting on SPEW_ABORT` on Mac | Rosetta can't expose `cpu MHz`; workaround is `-e CPU_MHZ=3000`, but futex bug still follows. **Use Linux.** |
+| `Fatal error: futex robust_list not initialized` on Mac | Rosetta + kernel 6.13+ incompat. Not fixable on Mac. **Use Linux.** |
 | Second run re-downloads bootstrap | Your `steamcmd-home` volume got deleted. `podman volume ls` to check, don't `podman system prune -a`. |
 | Can't see saves in Finder/Files | They're in `./saves/` on the host. If it's empty, the bind mount didn't attach — check for typos in the compose path. |
 | Mod downloaded but not active in game | Missing `modoverrides.lua` entry, or `enabled = false`. |
