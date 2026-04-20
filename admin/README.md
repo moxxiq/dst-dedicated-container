@@ -7,10 +7,11 @@ FastAPI + Jinja2 single-page dashboard for managing the sibling DST container.
 - Start / stop (graceful, 90 s) / restart the DST container.
 - Manual R2 backup trigger (independent of DST container state).
 - Upload cluster zip → parked slot (extracted and auto-flattened).
-- Template wizard → writes a fresh cluster into `saves/` or `parked/`.
-- Activate parked → swaps folders under the fixed `$CLUSTER_NAME` and restarts DST.
+- Template wizard → writes a fresh **two-shard** cluster (Master + Caves) into `saves/` or `parked/`, generating a random `cluster_key` and a `DST_CAVE` worldgenoverride for the underground shard.
+- Activate parked → swaps folders under the fixed `$CLUSTER_NAME` and restarts DST. Parked clusters lacking a `Caves/` shard refuse to activate (the DST container would hang on shard auth).
+- Header pills expose Master / Caves presence independently so you can see at a glance which shard is missing.
 - Edit `adminlist.txt` (KU_ IDs only, non-KU_ lines stripped on save).
-- Edit `dedicated_server_mods_setup.lua` and `Master/modoverrides.lua`.
+- Edit `dedicated_server_mods_setup.lua` and **both** per-shard `modoverrides.lua` files (Master + Caves) from a single form — DST requires each shard to have its own copy.
 - Download a freshly-baked `.env` or full `bootstrap.sh` for re-provisioning a new VPS in one paste.
 - Prominent red banner when Cloudflare R2 credentials aren't set — R2 is required, not optional, and the DST container refuses to launch without it.
 - Bootstrap download endpoints return 409 Conflict if R2 isn't configured (rather than generating a broken script).
