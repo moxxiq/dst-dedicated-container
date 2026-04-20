@@ -147,9 +147,27 @@ def cluster_dir() -> Path:
 
 
 def cluster_is_ready() -> bool:
-    """Mirror of the entrypoint's cluster_ready — are the required files there?"""
+    """Mirror of the entrypoint's cluster_ready — are the required files there?
+
+    A two-shard cluster needs cluster.ini + BOTH Master/server.ini and
+    Caves/server.ini. If any of the three is missing, DST refuses to launch.
+    """
     cd = cluster_dir()
-    return (cd / "cluster.ini").is_file() and (cd / "Master" / "server.ini").is_file()
+    return (
+        (cd / "cluster.ini").is_file()
+        and (cd / "Master" / "server.ini").is_file()
+        and (cd / "Caves" / "server.ini").is_file()
+    )
+
+
+def shard_status() -> dict[str, bool]:
+    """Per-shard presence flags for the dashboard."""
+    cd = cluster_dir()
+    return {
+        "cluster_ini": (cd / "cluster.ini").is_file(),
+        "master": (cd / "Master" / "server.ini").is_file(),
+        "caves": (cd / "Caves" / "server.ini").is_file(),
+    }
 
 
 def list_parked() -> list[dict[str, Any]]:
@@ -161,11 +179,17 @@ def list_parked() -> list[dict[str, Any]]:
             continue
         stat = child.stat()
         has_cluster_ini = (child / "cluster.ini").is_file()
+        has_master = (child / "Master" / "server.ini").is_file()
+        has_caves = (child / "Caves" / "server.ini").is_file()
         out.append(
             {
                 "name": child.name,
                 "mtime": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
-                "valid": has_cluster_ini,
+                # A parked cluster is "valid" only if it will actually launch:
+                # cluster.ini + both shards' server.ini files present.
+                "valid": has_cluster_ini and has_master and has_caves,
+                "has_master": has_master,
+                "has_caves": has_caves,
                 "size_mb": round(
                     sum(p.stat().st_size for p in child.rglob("*") if p.is_file()) / 1_048_576,
                     2,
@@ -210,19 +234,23 @@ offline_cluster = false
 console_enabled = true
 
 [SHARD]
-shard_enabled = false
+# Two-shard cluster: Master (overworld) + Caves (underground).
+# Shards talk to each other over 127.0.0.1:master_port; the cluster_key
+# authenticates the link and is generated fresh per cluster by the wizard.
+shard_enabled = true
 bind_ip = 127.0.0.1
 master_ip = 127.0.0.1
 master_port = 10888
-cluster_key = dstserverkey
+cluster_key = {cluster_key}
 """
 
-SERVER_INI_TEMPLATE = """\
+MASTER_SERVER_INI_TEMPLATE = """\
 [NETWORK]
 server_port = 10999
 
 [SHARD]
 is_master = true
+name = Master
 
 [STEAM]
 authentication_port = 8766
@@ -232,10 +260,85 @@ master_server_port = 27016
 encode_user_path = true
 """
 
+CAVES_SERVER_INI_TEMPLATE = """\
+[NETWORK]
+server_port = 10998
+
+[SHARD]
+is_master = false
+name = Caves
+
+[STEAM]
+authentication_port = 8768
+master_server_port = 27018
+
+[ACCOUNT]
+encode_user_path = true
+"""
+
 MODOVERRIDES_TEMPLATE = """\
 return {
 }
 """
+
+# Marks a shard directory as caves-enabled. Klei's own shard template writes
+# this file; we mirror it so the generated cluster matches vanilla layouts.
+WORLDGENOVERRIDE_CAVES = """\
+return {
+  override_enabled = true,
+  preset = "DST_CAVE",
+}
+"""
+
+
+def _write_cluster_files(
+    cd: Path,
+    *,
+    cluster_name: str,
+    password: str,
+    max_players: int,
+    game_mode: str,
+    pvp: bool,
+    description: str,
+    intention: str,
+) -> None:
+    """Write cluster.ini + both shard dirs into `cd`.
+
+    Shared between write_template_cluster (saves/) and the parked-target code
+    path. Caller guarantees `cd` does not already exist.
+    """
+    (cd / "Master").mkdir(parents=True, exist_ok=False)
+    (cd / "Caves").mkdir(parents=True, exist_ok=False)
+
+    # A per-cluster random key authenticates the shard-to-shard link. Any
+    # reasonably random 16-byte string is fine — shards compare literally.
+    cluster_key = secrets.token_hex(16)
+
+    (cd / "cluster.ini").write_text(
+        CLUSTER_INI_TEMPLATE.format(
+            game_mode=game_mode,
+            max_players=max_players,
+            pvp="true" if pvp else "false",
+            cluster_name=cluster_name,
+            cluster_description=description.replace("\n", " "),
+            password=password,
+            intention=intention,
+            cluster_key=cluster_key,
+        ),
+        encoding="utf-8",
+    )
+    (cd / "Master" / "server.ini").write_text(MASTER_SERVER_INI_TEMPLATE, encoding="utf-8")
+    (cd / "Master" / "modoverrides.lua").write_text(MODOVERRIDES_TEMPLATE, encoding="utf-8")
+
+    (cd / "Caves" / "server.ini").write_text(CAVES_SERVER_INI_TEMPLATE, encoding="utf-8")
+    (cd / "Caves" / "modoverrides.lua").write_text(MODOVERRIDES_TEMPLATE, encoding="utf-8")
+    # worldgenoverride.lua marks the Caves shard as a caves preset; without
+    # this the shard would try to generate an overworld.
+    (cd / "Caves" / "worldgenoverride.lua").write_text(WORLDGENOVERRIDE_CAVES, encoding="utf-8")
+
+    (cd / "adminlist.txt").write_text("", encoding="utf-8")
+    # cluster_token.txt is intentionally NOT written here — the DST entrypoint
+    # writes it from $CLUSTER_TOKEN in .env on launch.
 
 
 def write_template_cluster(
@@ -251,25 +354,16 @@ def write_template_cluster(
     cd = SAVES_DIR / cluster_name
     if cd.exists():
         raise HTTPException(status_code=409, detail=f"Cluster '{cluster_name}' already exists")
-    (cd / "Master").mkdir(parents=True, exist_ok=True)
-
-    (cd / "cluster.ini").write_text(
-        CLUSTER_INI_TEMPLATE.format(
-            game_mode=game_mode,
-            max_players=max_players,
-            pvp="true" if pvp else "false",
-            cluster_name=cluster_name,
-            cluster_description=description.replace("\n", " "),
-            password=password,
-            intention=intention,
-        ),
-        encoding="utf-8",
+    _write_cluster_files(
+        cd,
+        cluster_name=cluster_name,
+        password=password,
+        max_players=max_players,
+        game_mode=game_mode,
+        pvp=pvp,
+        description=description,
+        intention=intention,
     )
-    (cd / "Master" / "server.ini").write_text(SERVER_INI_TEMPLATE, encoding="utf-8")
-    (cd / "Master" / "modoverrides.lua").write_text(MODOVERRIDES_TEMPLATE, encoding="utf-8")
-    (cd / "adminlist.txt").write_text("", encoding="utf-8")
-    # cluster_token.txt is intentionally NOT written here — the DST entrypoint
-    # writes it from $CLUSTER_TOKEN in .env on launch.
     return cd
 
 
@@ -382,11 +476,14 @@ app.mount("/static", StaticFiles(directory=str(APP_ROOT / "static")), name="stat
 
 # ---- Dashboard ----
 
+def _read_text_or_empty(p: Path) -> str:
+    return p.read_text(encoding="utf-8") if p.is_file() else ""
+
+
 @app.get("/", response_class=HTMLResponse)
 def dashboard(request: Request, _: str = Depends(require_auth)) -> HTMLResponse:
     env = read_env_file()
     cd = cluster_dir()
-    modoverrides_path = cd / "Master" / "modoverrides.lua"
     mods_setup_path = MODS_DIR / "dedicated_server_mods_setup.lua"
     adminlist_path = cd / "adminlist.txt"
     return TEMPLATES.TemplateResponse(
@@ -396,12 +493,14 @@ def dashboard(request: Request, _: str = Depends(require_auth)) -> HTMLResponse:
             "cluster_name": CLUSTER_NAME,
             "cluster_ready": cluster_is_ready(),
             "cluster_exists": cd.exists(),
+            "shards": shard_status(),
             "dst": dst_status(),
             "parked": list_parked(),
             "r2_ready": r2_env_ready(env),
-            "adminlist": adminlist_path.read_text(encoding="utf-8") if adminlist_path.is_file() else "",
-            "mods_setup": mods_setup_path.read_text(encoding="utf-8") if mods_setup_path.is_file() else "",
-            "modoverrides": modoverrides_path.read_text(encoding="utf-8") if modoverrides_path.is_file() else "",
+            "adminlist": _read_text_or_empty(adminlist_path),
+            "mods_setup": _read_text_or_empty(mods_setup_path),
+            "modoverrides_master": _read_text_or_empty(cd / "Master" / "modoverrides.lua"),
+            "modoverrides_caves": _read_text_or_empty(cd / "Caves" / "modoverrides.lua"),
             "env_keys": sorted(read_env_file().keys()),
         },
     )
@@ -412,6 +511,7 @@ def json_status(_: str = Depends(require_auth)) -> Response:
     data = {
         "cluster": CLUSTER_NAME,
         "cluster_ready": cluster_is_ready(),
+        "shards": shard_status(),
         "dst": dst_status(),
         "parked_count": len(list_parked()),
         "r2_ready": r2_env_ready(read_env_file()),
@@ -504,29 +604,22 @@ def cluster_template(
         raise HTTPException(status_code=400, detail="invalid game_mode")
 
     if target == "parked":
-        # Write into parked/, then user can activate later.
-        original_saves = SAVES_DIR
-        # Trick: redirect SAVES_DIR to PARKED_DIR for this call.
+        # Write into parked/, user activates later. Shared helper guarantees
+        # both Master and Caves shard files land in the right layout.
+        PARKED_DIR.mkdir(exist_ok=True)
         cd_target = PARKED_DIR / name
         if cd_target.exists():
             raise HTTPException(status_code=409, detail=f"Parked '{name}' already exists")
-        # Compose the files directly without the helper (which wants SAVES_DIR).
-        (cd_target / "Master").mkdir(parents=True)
-        (cd_target / "cluster.ini").write_text(
-            CLUSTER_INI_TEMPLATE.format(
-                game_mode=game_mode,
-                max_players=max_players,
-                pvp="true" if pvp else "false",
-                cluster_name=name,
-                cluster_description=description.replace("\n", " "),
-                password=password,
-                intention="cooperative",
-            ),
-            encoding="utf-8",
+        _write_cluster_files(
+            cd_target,
+            cluster_name=name,
+            password=password,
+            max_players=max_players,
+            game_mode=game_mode,
+            pvp=pvp,
+            description=description,
+            intention="cooperative",
         )
-        (cd_target / "Master" / "server.ini").write_text(SERVER_INI_TEMPLATE, encoding="utf-8")
-        (cd_target / "Master" / "modoverrides.lua").write_text(MODOVERRIDES_TEMPLATE, encoding="utf-8")
-        (cd_target / "adminlist.txt").write_text("", encoding="utf-8")
     else:
         # Write directly as the active cluster. Only legal when no active cluster exists.
         write_template_cluster(
@@ -612,13 +705,23 @@ def admins_save(
 @app.post("/mods")
 def mods_save(
     mods_setup: str = Form(""),
-    modoverrides: str = Form(""),
+    modoverrides_master: str = Form(""),
+    modoverrides_caves: str = Form(""),
     _: str = Depends(require_auth),
 ) -> RedirectResponse:
+    """Write the workshop list + both shards' modoverrides.
+
+    modoverrides is per-shard in DST (mods enabled on Master aren't
+    automatically enabled on Caves, and vice versa). Common practice is
+    to keep the two in sync; the UI presents them as separate textareas
+    but the caller can copy-paste to unify.
+    """
     MODS_DIR.mkdir(exist_ok=True)
     (MODS_DIR / "dedicated_server_mods_setup.lua").write_text(mods_setup, encoding="utf-8")
     if cluster_is_ready():
-        (cluster_dir() / "Master" / "modoverrides.lua").write_text(modoverrides, encoding="utf-8")
+        cd = cluster_dir()
+        (cd / "Master" / "modoverrides.lua").write_text(modoverrides_master, encoding="utf-8")
+        (cd / "Caves" / "modoverrides.lua").write_text(modoverrides_caves, encoding="utf-8")
     return RedirectResponse("/", status_code=303)
 
 

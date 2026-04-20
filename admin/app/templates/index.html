@@ -16,6 +16,8 @@
       <span class="pill {{ 'ok' if cluster_ready else 'warn' }}">
         Cluster: {{ 'ready' if cluster_ready else ('empty' if not cluster_exists else 'incomplete') }}
       </span>
+      <span class="pill {{ 'ok' if shards.master else 'warn' }}">Master: {{ 'ok' if shards.master else 'missing' }}</span>
+      <span class="pill {{ 'ok' if shards.caves else 'warn' }}">Caves: {{ 'ok' if shards.caves else 'missing' }}</span>
       <span class="pill {{ 'ok' if r2_ready else 'err' }}">
         R2: {{ 'configured' if r2_ready else 'NOT SET' }}
       </span>
@@ -87,20 +89,22 @@
         <label>Zip file <input type="file" name="zipfile" accept=".zip" required /></label>
         <button type="submit">Upload</button>
       </form>
-      <p class="muted">Zip should contain the cluster folder's contents (cluster.ini, Master/, etc.) — single top-level folder is auto-flattened.</p>
+      <p class="muted">Zip should contain the cluster folder's contents: <code>cluster.ini</code>, <code>Master/server.ini</code>, <code>Caves/server.ini</code>, plus each shard's <code>worldgenoverride.lua</code>/<code>modoverrides.lua</code>. A single top-level folder is auto-flattened. Clusters missing the Caves shard will park but cannot activate — recreate via the template wizard.</p>
     </section>
 
     <section>
       <h2>Parked clusters ({{ parked|length }})</h2>
       {% if parked %}
       <table>
-        <thead><tr><th>Name</th><th>Size</th><th>Last modified (UTC)</th><th>Valid</th><th>Actions</th></tr></thead>
+        <thead><tr><th>Name</th><th>Size</th><th>Last modified (UTC)</th><th>Master</th><th>Caves</th><th>Valid</th><th>Actions</th></tr></thead>
         <tbody>
         {% for p in parked %}
           <tr>
             <td><code>{{ p.name }}</code></td>
             <td>{{ p.size_mb }} MB</td>
             <td>{{ p.mtime }}</td>
+            <td>{{ '✓' if p.has_master else '—' }}</td>
+            <td>{{ '✓' if p.has_caves else '—' }}</td>
             <td>{{ '✓' if p.valid else '—' }}</td>
             <td>
               <form method="post" action="/cluster/activate" class="inline">
@@ -132,11 +136,14 @@
 
     <section>
       <h2>Mods</h2>
-      <label>dedicated_server_mods_setup.lua (workshop IDs to download)</label>
+      <p class="muted">DST requires a modoverrides.lua in <em>each</em> shard directory — keep Master and Caves in sync unless you specifically want shard-differentiated mod behavior.</p>
       <form method="post" action="/mods">
+        <label>dedicated_server_mods_setup.lua (workshop IDs to download)</label>
         <textarea name="mods_setup" rows="6">{{ mods_setup }}</textarea>
-        <label>Master/modoverrides.lua (per-cluster enable + config)</label>
-        <textarea name="modoverrides" rows="10" {% if not cluster_ready %}disabled{% endif %}>{{ modoverrides }}</textarea>
+        <label>Master/modoverrides.lua (per-shard enable + config — overworld)</label>
+        <textarea name="modoverrides_master" rows="10" {% if not cluster_ready %}disabled{% endif %}>{{ modoverrides_master }}</textarea>
+        <label>Caves/modoverrides.lua (per-shard enable + config — underground)</label>
+        <textarea name="modoverrides_caves" rows="10" {% if not cluster_ready %}disabled{% endif %}>{{ modoverrides_caves }}</textarea>
         <button type="submit">Save mods config</button>
       </form>
       <p class="muted">Restart the server after editing mods; workshop downloads happen on boot.</p>
