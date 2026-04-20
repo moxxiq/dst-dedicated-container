@@ -1,0 +1,38 @@
+# Admin panel stack — separate from the DST container.
+# Start with:  cd admin && podman compose up -d
+# Stop with:   cd admin && podman compose down
+#
+# The DST container is launched separately via ../run-dst.sh — this panel
+# controls it over the mounted podman socket.
+
+services:
+  admin:
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+    image: local/dst-admin:latest
+    platform: linux/amd64
+    container_name: dst-admin
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - path: ../.env
+        required: true
+    environment:
+      DST_CONTAINER: "${DST_CONTAINER:-dst}"
+      CLUSTER_NAME: "${CLUSTER_NAME:-qkation-cooperative}"
+      ADMIN_USER: "${ADMIN_USER:-admin}"
+      # ADMIN_PASSWORD comes from ../.env
+    volumes:
+      # Bind the whole project root at /data so the panel can edit saves/,
+      # mods/, parked/, .env, etc. through stable paths.
+      - ..:/data:U
+      # Podman socket from host — lets the panel run `podman start dst` etc.
+      # Rootless path on Linux: /run/user/1000/podman/podman.sock
+      # If that doesn't exist, fall back to /run/podman/podman.sock (root) or
+      # override XDG_RUNTIME_DIR in the compose override.
+      - ${XDG_RUNTIME_DIR:-/run/user/1000}/podman/podman.sock:/run/podman/podman.sock
+    # The admin container needs to reach the DST container via podman CLI,
+    # so it talks to the socket — no direct network linkage needed.
