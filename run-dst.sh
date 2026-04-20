@@ -55,8 +55,11 @@ case "${1:-start}" in
       --restart unless-stopped \
       --stop-timeout "$STOP_TIMEOUT" \
       -p 10999:10999/udp \
+      -p 10998:10998/udp \
       -p 8766:8766/udp \
+      -p 8768:8768/udp \
       -p 27016:27016/udp \
+      -p 27018:27018/udp \
       "${ENV_ARGS[@]}" \
       -v steamcmd-home:/home/ubuntu/.local/share/Steam \
       -v dst-server:/home/ubuntu/dst \

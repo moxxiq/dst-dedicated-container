@@ -20,11 +20,14 @@ services:
     # stdin/tty on so the DST console is usable when `podman compose run` interactively.
     stdin_open: true
     tty: true
-    # DST's UDP ports — mirror run-dst.sh.
+    # DST's UDP ports — mirror run-dst.sh. Two shards → two sets of ports.
     ports:
-      - "10999:10999/udp"   # game
-      - "8766:8766/udp"     # Steam auth
-      - "27016:27016/udp"   # Steam master query
+      - "10999:10999/udp"   # Master game
+      - "10998:10998/udp"   # Caves game
+      - "8766:8766/udp"     # Master Steam auth
+      - "8768:8768/udp"     # Caves Steam auth
+      - "27016:27016/udp"   # Master Steam master query
+      - "27018:27018/udp"   # Caves Steam master query
     env_file:
       - path: .env
         required: false
