@@ -53,7 +53,36 @@ Beszel monitoring) in under ten minutes, most of it image build time.
 
 ## Running the bootstrap
 
-SSH in as root (or a sudo user):
+Three ways to run it — pick whichever fits your workflow:
+
+### Option A — Vultr Startup Script (zero SSH, fully unattended)
+
+1. Open `bootstrap/vultr-startup-script.sh` in any text editor.
+2. Fill in your values in the **FILL IN THESE VARS** block at the top.
+3. Vultr dashboard → **Startup Scripts → Add Script** → paste the whole
+   filled-in file → Save.
+4. Attach the script when creating the VPS. It runs as root on first boot.
+
+> The admin panel's **Download bootstrap.sh** button generates an
+> equivalent pre-filled script from your running `.env`, so re-provisioning
+> a new VPS is a one-paste operation.
+
+### Option B — vars file (non-interactive SSH)
+
+```bash
+# 1. Fill in the template
+cp bootstrap/bootstrap.vars.example bootstrap.vars
+$EDITOR bootstrap.vars           # fill in every value
+
+# 2. Download and run — no prompts
+curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh -o bootstrap.sh
+chmod +x bootstrap.sh
+sudo ./bootstrap.sh --vars bootstrap.vars
+```
+
+`bootstrap.vars` is in `.gitignore` — safe to keep in the checkout.
+
+### Option C — interactive SSH (original flow)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh -o bootstrap.sh
@@ -71,7 +100,7 @@ The script asks for:
   (all four required — the script re-prompts on empty input)
 - **Beszel monitoring** y/N
 
-It then:
+All three modes then:
 
 - Installs `podman`, `git`, rootless support packages
 - Creates a `dst` Linux user (with lingering so rootless podman survives
@@ -98,11 +127,12 @@ At the end it prints a summary with URLs and a firewall checklist.
 
 ## Re-running on a new VPS
 
-The admin panel has a **Download bootstrap.sh** button that bakes your
-current `.env` into a self-contained copy of this script. That version
-needs zero interactive input — paste it onto a new VPS and it restores
-your whole setup (including R2 + cluster secrets) automatically. Use
-that when migrating regions or rebuilding after a VPS failure.
+The admin panel has a **Download bootstrap.sh** button that generates a
+pre-filled Vultr Startup Script from your running `.env`. Paste it into
+Vultr's Startup Scripts UI when creating the replacement VPS, or just
+paste it directly into the SSH terminal — no extra typing needed. R2
+stores all cluster saves, so the new VPS picks up exactly where the old
+one left off after DST's first-boot restore.
 
 ## Idempotency
 

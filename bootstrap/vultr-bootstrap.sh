@@ -1,17 +1,23 @@
 #!/usr/bin/env bash
 # DST dedicated server — Vultr VPS one-shot bootstrap.
 #
-# Usage (on a fresh root SSH session into an Ubuntu 22.04 / 24.04 Vultr VPS):
-#
+# INTERACTIVE (SSH — prompts for all values):
 #   curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh -o bootstrap.sh
 #   chmod +x bootstrap.sh
 #   sudo ./bootstrap.sh
 #
-# The script prompts interactively for secrets (admin panel password, Klei
-# cluster token, Cloudflare R2 keys). Nothing is baked into this file —
-# it's safe to commit and safe to rerun. R2 is required: the DST container
-# won't launch without it (backups, restores, and first-boot recovery all
-# flow through R2).
+# NON-INTERACTIVE — fill a vars file and pass it:
+#   cp bootstrap/bootstrap.vars.example bootstrap.vars
+#   # edit bootstrap.vars
+#   sudo ./bootstrap.sh --vars bootstrap.vars
+#
+# NON-INTERACTIVE — pre-export vars, then run:
+#   export CLUSTER_TOKEN="..." ADMIN_PASSWORD="..." R2_ACCOUNT_ID="..." ...
+#   sudo ./bootstrap.sh
+#
+# NON-INTERACTIVE — Vultr Startup Script (zero SSH needed):
+#   See bootstrap/vultr-startup-script.sh — fill in vars at top, paste into
+#   Vultr dashboard → Startup Scripts → Add Script → attach to VPS on create.
 #
 # After it finishes you'll have:
 #   - A `dst` Linux user owning ~/steamCMD
@@ -29,74 +35,130 @@ DST_HOME="/home/${DST_USER}"
 TARGET="${TARGET:-${DST_HOME}/steamCMD}"
 CLUSTER_NAME_DEFAULT="qkation-cooperative"
 
-say() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
+say()  { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m! %s\033[0m\n' "$*" >&2; }
-die() { printf '\033[1;31mx %s\033[0m\n' "$*" >&2; exit 1; }
+die()  { printf '\033[1;31mx %s\033[0m\n' "$*" >&2; exit 1; }
 
 [[ $EUID -eq 0 ]] || die "Run as root (sudo ./bootstrap.sh)."
 
-# ---- 1. Interactive prompts -------------------------------------------------
-say "Interactive setup"
-# Use /dev/tty so prompts work even when the script is piped.
-exec 3</dev/tty 4>/dev/tty || die "No controlling TTY. SSH in interactively first."
-
-read -r -u3 -p "Cluster name [${CLUSTER_NAME_DEFAULT}]: " CLUSTER_NAME
-CLUSTER_NAME="${CLUSTER_NAME:-$CLUSTER_NAME_DEFAULT}"
-
-read -r -u3 -p "Klei cluster token (paste from accounts.klei.com): " CLUSTER_TOKEN
-[[ -n "$CLUSTER_TOKEN" ]] || warn "Empty cluster token — DST will not start until you set it."
-
-read -r -u3 -p "Admin panel username [admin]: " ADMIN_USER
-ADMIN_USER="${ADMIN_USER:-admin}"
-
-while :; do
-  read -r -u3 -s -p "Admin panel password (required, min 8 chars): " ADMIN_PASSWORD; echo
-  read -r -u3 -s -p "Repeat: " ADMIN_PASSWORD2; echo
-  if [[ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD2" ]]; then warn "Mismatch, try again."; continue; fi
-  if [[ ${#ADMIN_PASSWORD} -lt 8 ]]; then warn "Too short."; continue; fi
-  break
+# ---- 0. Parse flags ----------------------------------------------------------
+VARS_FILE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --vars|-v)
+            VARS_FILE="${2:?--vars requires a file argument}"
+            shift 2
+            ;;
+        *)
+            die "Unknown argument: $1  (usage: $0 [--vars FILE])"
+            ;;
+    esac
 done
 
-say "Cloudflare R2 backup (REQUIRED — DST refuses to launch without it)"
-cat >&2 <<'R2NOTE'
+# Source a vars file if given — runs before the interactive/non-interactive check.
+if [[ -n "$VARS_FILE" ]]; then
+    [[ -f "$VARS_FILE" ]] || die "--vars: file not found: $VARS_FILE"
+    # shellcheck source=/dev/null
+    source "$VARS_FILE"
+fi
+
+# ---- 1. Interactive vs non-interactive ---------------------------------------
+# Non-interactive mode activates when all required vars are already set
+# (via --vars, via pre-exported env vars, or from vultr-startup-script.sh).
+_required_vars_set() {
+    [[ -n "${CLUSTER_TOKEN:-}"        &&
+       -n "${ADMIN_PASSWORD:-}"       &&
+       -n "${R2_ACCOUNT_ID:-}"        &&
+       -n "${R2_BUCKET:-}"            &&
+       -n "${R2_ACCESS_KEY_ID:-}"     &&
+       -n "${R2_SECRET_ACCESS_KEY:-}" ]]
+}
+
+if _required_vars_set; then
+    say "Non-interactive mode — using pre-set variables"
+
+    # Apply defaults for optional vars.
+    CLUSTER_NAME="${CLUSTER_NAME:-$CLUSTER_NAME_DEFAULT}"
+    ADMIN_USER="${ADMIN_USER:-admin}"
+    INSTALL_BESZEL="${INSTALL_BESZEL:-n}"
+    INSTALL_BESZEL="${INSTALL_BESZEL,,}"
+
+    # Validate what we can without a TTY.
+    [[ ${#ADMIN_PASSWORD} -ge 8 ]] || die "ADMIN_PASSWORD must be at least 8 characters."
+    [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "n" \
+       || "$INSTALL_BESZEL" == "yes" || "$INSTALL_BESZEL" == "no" ]] \
+        || warn "INSTALL_BESZEL='${INSTALL_BESZEL}' unexpected — expected y/n; treating as n."
+
+    printf '  CLUSTER_NAME  : %s\n'  "$CLUSTER_NAME"
+    printf '  ADMIN_USER    : %s\n'  "$ADMIN_USER"
+    printf '  R2_BUCKET     : %s\n'  "$R2_BUCKET"
+    printf '  INSTALL_BESZEL: %s\n'  "$INSTALL_BESZEL"
+    printf '  (secrets omitted from log)\n'
+
+else
+    # ---- Interactive path ----------------------------------------------------
+    say "Interactive setup"
+    # Use /dev/tty so prompts work even when the script is piped.
+    exec 3</dev/tty 4>/dev/tty || die "No controlling TTY. SSH in interactively first, or pre-set variables — see bootstrap/bootstrap.vars.example or bootstrap/vultr-startup-script.sh."
+
+    read -r -u3 -p "Cluster name [${CLUSTER_NAME_DEFAULT}]: " CLUSTER_NAME
+    CLUSTER_NAME="${CLUSTER_NAME:-$CLUSTER_NAME_DEFAULT}"
+
+    read -r -u3 -p "Klei cluster token (paste from accounts.klei.com): " CLUSTER_TOKEN
+    [[ -n "$CLUSTER_TOKEN" ]] || warn "Empty cluster token — DST will not start until you set it."
+
+    read -r -u3 -p "Admin panel username [admin]: " ADMIN_USER
+    ADMIN_USER="${ADMIN_USER:-admin}"
+
+    while :; do
+        read -r -u3 -s -p "Admin panel password (required, min 8 chars): " ADMIN_PASSWORD; echo
+        read -r -u3 -s -p "Repeat: " ADMIN_PASSWORD2; echo
+        if [[ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD2" ]]; then warn "Mismatch, try again."; continue; fi
+        if [[ ${#ADMIN_PASSWORD} -lt 8 ]];               then warn "Too short."; continue; fi
+        break
+    done
+
+    say "Cloudflare R2 backup (REQUIRED — DST refuses to launch without it)"
+    cat >&2 <<'R2NOTE'
   Create a bucket + API token at https://dash.cloudflare.com/?to=/:account/r2
   The token needs Object Read & Write scope on your bucket.
 R2NOTE
-while :; do read -r -u3 -p    "R2 account ID:    " R2_ACCOUNT_ID;          [[ -n "$R2_ACCOUNT_ID"        ]] && break; warn "required."; done
-while :; do read -r -u3 -p    "R2 bucket:        " R2_BUCKET;              [[ -n "$R2_BUCKET"            ]] && break; warn "required."; done
-while :; do read -r -u3 -p    "R2 access key ID: " R2_ACCESS_KEY_ID;       [[ -n "$R2_ACCESS_KEY_ID"     ]] && break; warn "required."; done
-while :; do read -r -u3 -s -p "R2 secret key:    " R2_SECRET_ACCESS_KEY; echo
-            [[ -n "$R2_SECRET_ACCESS_KEY" ]] && break; warn "required."; done
+    while :; do read -r -u3 -p    "R2 account ID:    " R2_ACCOUNT_ID;          [[ -n "$R2_ACCOUNT_ID"        ]] && break; warn "required."; done
+    while :; do read -r -u3 -p    "R2 bucket:        " R2_BUCKET;              [[ -n "$R2_BUCKET"            ]] && break; warn "required."; done
+    while :; do read -r -u3 -p    "R2 access key ID: " R2_ACCESS_KEY_ID;       [[ -n "$R2_ACCESS_KEY_ID"     ]] && break; warn "required."; done
+    while :; do read -r -u3 -s -p "R2 secret key:    " R2_SECRET_ACCESS_KEY; echo
+                [[ -n "$R2_SECRET_ACCESS_KEY" ]] && break; warn "required."; done
 
-read -r -u3 -p "Also install Beszel monitoring (:8090)? [y/N]: " INSTALL_BESZEL
-INSTALL_BESZEL="${INSTALL_BESZEL,,}"  # lowercase
+    read -r -u3 -p "Also install Beszel monitoring (:8090)? [y/N]: " INSTALL_BESZEL
+    INSTALL_BESZEL="${INSTALL_BESZEL,,}"  # lowercase
+fi
 
-# ---- 2. System packages -----------------------------------------------------
+# ---- 2. System packages ------------------------------------------------------
 say "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
+apt-get update -qq
 apt-get install -y --no-install-recommends \
-  podman git rsync ca-certificates uidmap slirp4netns fuse-overlayfs \
-  dbus-user-session systemd-container
+    podman git rsync ca-certificates curl uidmap slirp4netns fuse-overlayfs \
+    dbus-user-session systemd-container
 
-# ---- 3. User + rootless runtime --------------------------------------------
+# ---- 3. User + rootless runtime ---------------------------------------------
 say "Creating ${DST_USER} user"
 if ! id "$DST_USER" >/dev/null 2>&1; then
-  useradd -m -s /bin/bash "$DST_USER"
+    useradd -m -s /bin/bash "$DST_USER"
 fi
 loginctl enable-linger "$DST_USER"
 
 as_dst() { sudo -u "$DST_USER" -H XDG_RUNTIME_DIR="/run/user/$(id -u "$DST_USER")" "$@"; }
 
-# ---- 4. Clone the repo ------------------------------------------------------
+# ---- 4. Clone the repo -------------------------------------------------------
 say "Fetching repo at ${TARGET}"
 if [[ -d "$TARGET/.git" ]]; then
-  as_dst git -C "$TARGET" pull --ff-only || warn "git pull failed; keeping existing checkout."
+    as_dst git -C "$TARGET" pull --ff-only || warn "git pull failed; keeping existing checkout."
 else
-  sudo -u "$DST_USER" -H git clone "$REPO_URL" "$TARGET"
+    sudo -u "$DST_USER" -H git clone "$REPO_URL" "$TARGET"
 fi
 
-# ---- 5. Write .env (DST + admin) -------------------------------------------
+# ---- 5. Write .env (DST + admin) --------------------------------------------
 say "Writing ${TARGET}/.env"
 umask 077
 cat > "$TARGET/.env" <<EOF
@@ -121,9 +183,6 @@ umask 022
 # ---- 6. Bind-mount ownership ------------------------------------------------
 mkdir -p "$TARGET/saves" "$TARGET/mods" "$TARGET/parked"
 chown -R "$DST_USER:$DST_USER" "$TARGET"
-# Inside the DST container the app runs as UID 1000, which for rootless podman
-# maps to the host's DST_USER (first subuid slot). The :U flag in compose/
-# run-dst.sh handles the chown on mount, so no further tweaks needed here.
 
 # ---- 7. Build & start DST ---------------------------------------------------
 say "Building DST image"
@@ -132,20 +191,20 @@ as_dst bash -c "cd '$TARGET' && podman build --platform=linux/amd64 -t local/ste
 say "Starting DST container"
 as_dst bash -c "cd '$TARGET' && ./run-dst.sh start"
 
-# ---- 8. Build & start admin panel ------------------------------------------
+# ---- 8. Build & start admin panel -------------------------------------------
 say "Building admin panel image"
 as_dst bash -c "cd '$TARGET/admin' && podman build --platform=linux/amd64 -t local/dst-admin:latest ."
 
 say "Starting admin panel"
 as_dst bash -c "cd '$TARGET/admin' && podman compose up -d"
 
-# ---- 9. Optional Beszel monitoring -----------------------------------------
+# ---- 9. Optional Beszel monitoring ------------------------------------------
 if [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]]; then
-  say "Starting Beszel monitoring"
-  as_dst bash -c "cd '$TARGET/monitoring' && podman compose up -d"
+    say "Starting Beszel monitoring"
+    as_dst bash -c "cd '$TARGET/monitoring' && podman compose up -d"
 fi
 
-# ---- 10. Summary ------------------------------------------------------------
+# ---- 10. Summary -------------------------------------------------------------
 VPS_IP="$(hostname -I | awk '{print $1}')"
 say "Bootstrap complete"
 cat <<EOF
@@ -172,7 +231,7 @@ $( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "  Besze
     3. DST is currently waiting for a cluster — it will pick up the files
        within 5 seconds of the admin panel writing them.
 
-  To re-run this bootstrap on a new VPS, download the latest .env from
-  the admin panel ("Download bootstrap.sh") — it bakes in all the secrets
-  so the next paste needs zero extra typing.
+  To re-run this bootstrap on a new VPS, download the pre-filled startup
+  script from the admin panel ("Download bootstrap.sh") — it bakes in all
+  secrets so the next paste needs zero extra typing.
 EOF
