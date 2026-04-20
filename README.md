@@ -64,7 +64,10 @@ cp .env.example .env
 $EDITOR .env     # paste CLUSTER_TOKEN, R2_* keys; pick CLUSTER_NAME
 ```
 
-At minimum: `CLUSTER_NAME` and either `CLUSTER_TOKEN` (in `.env`) or a pre-populated `saves/<cluster>/cluster_token.txt`. R2 vars are optional — leave blank to disable backup/restore.
+Required in `.env`:
+- `CLUSTER_NAME`
+- `CLUSTER_TOKEN` (or a pre-populated `saves/<cluster>/cluster_token.txt`)
+- **All four `R2_*` keys.** Cloudflare R2 is not optional — the entrypoint exits on launch if any are missing. Saves, restores, and the first-boot wait-for-cluster path all depend on it. Create a bucket + Object R/W token at https://dash.cloudflare.com → R2.
 
 ### 3. Run the server (production)
 
@@ -110,13 +113,13 @@ If you want Mac-native steamcmd, OrbStack works (different runtime, ships its ow
 Three layers of save handling:
 
 1. **Host folder `./saves/`** — a normal directory; use any host tool (below).
-2. **Automatic R2 backups** — if `R2_*` env vars are set, the entrypoint watches for every DST save (autosave, `c_save()`, day change) via inotify, debounces 10 s, tars the cluster, and uploads to:
+2. **Automatic R2 backups** — R2 is required; the entrypoint watches for every DST save (autosave, `c_save()`, day change) via inotify, debounces 10 s, tars the cluster, and uploads to:
    - `r2://<bucket>/clusters/<cluster>/latest.tar.gz` (overwritten each time)
    - `r2://<bucket>/clusters/<cluster>/history/<ISO-timestamp>-<tag>.tar.gz` (kept)
 3. **Graceful-stop backup** — `./run-dst.sh stop` runs `c_save()` + `c_shutdown(true)` inside the server, waits for clean exit, then does a final R2 push tagged `shutdown`.
 
 **Fresh VPS, saves folder empty?**
-- If R2 is configured and `clusters/<cluster>/latest.tar.gz` exists → entrypoint restores it automatically, then launches. No manual pull.
+- If `clusters/<cluster>/latest.tar.gz` exists in R2 → entrypoint restores it automatically, then launches. No manual pull.
 - If R2 is empty too → entrypoint **waits** (5 s poll, heartbeat every 60 s) for the admin panel to provision the cluster. It does **not** auto-generate a fresh world. Two creation paths (Phase 3):
   - **Upload cluster zip** — park-and-pick. The zip sits in `saves/<cluster>/` and the waiting container picks it up on the next poll.
   - **Template-server wizard** — form (name, password, max players, game mode, pvp, description) → writes cluster.ini / server.ini / modoverrides.lua → container launches.
