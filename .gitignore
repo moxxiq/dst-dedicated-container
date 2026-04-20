@@ -10,3 +10,7 @@ parked/
 __pycache__/
 *.pyc
 *.pyo
+
+# Non-interactive bootstrap vars (secrets — user creates from bootstrap.vars.example)
+bootstrap/bootstrap.vars
+bootstrap.vars
