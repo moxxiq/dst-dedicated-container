@@ -156,12 +156,16 @@ $( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "  Besze
 
   Next steps:
     1. Open Vultr Cloud Firewall and allow:
-         UDP  10999       from anywhere   (DST game)
-         UDP  8766        from anywhere   (Steam auth)
-         UDP  27016       from anywhere   (Steam master)
+         UDP  10999       from anywhere   (DST Master shard — overworld)
+         UDP  8766        from anywhere   (Steam auth — Master)
+         UDP  27016       from anywhere   (Steam master server — Master)
+         UDP  10998       from anywhere   (DST Caves shard — underground)
+         UDP  8768        from anywhere   (Steam auth — Caves)
+         UDP  27018       from anywhere   (Steam master server — Caves)
          TCP  22          from your IP    (SSH)
          TCP  8080        from your IP    (admin panel)$( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "
          TCP  8090        from your IP    (Beszel UI)" )
+       (Missing caves UDP rules silently break surface↔caves teleports.)
     2. Open http://${VPS_IP}:8080 and either:
          - upload an existing cluster zip, or
          - use the template wizard to create a new world.
