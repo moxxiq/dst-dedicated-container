@@ -19,14 +19,22 @@ Beszel monitoring) in under ten minutes, most of it image build time.
    - Networking → Firewall → Add Firewall Group
    - Rules:
 
-     | Proto | Port  | Source       | Purpose                    |
-     |-------|-------|--------------|----------------------------|
-     | UDP   | 10999 | anywhere     | DST game traffic           |
-     | UDP   | 8766  | anywhere     | Steam auth                 |
-     | UDP   | 27016 | anywhere     | Steam master server        |
-     | TCP   | 22    | your IP/CIDR | SSH                        |
-     | TCP   | 8080  | your IP/CIDR | Admin panel                |
-     | TCP   | 8090  | your IP/CIDR | Beszel UI (if installed)   |
+     | Proto | Port  | Source       | Purpose                              |
+     |-------|-------|--------------|--------------------------------------|
+     | UDP   | 10999 | anywhere     | DST Master shard (overworld) game    |
+     | UDP   | 8766  | anywhere     | Steam auth (Master)                  |
+     | UDP   | 27016 | anywhere     | Steam master server (Master)         |
+     | UDP   | 10998 | anywhere     | DST Caves shard (underground) game   |
+     | UDP   | 8768  | anywhere     | Steam auth (Caves)                   |
+     | UDP   | 27018 | anywhere     | Steam master server (Caves)          |
+     | TCP   | 22    | your IP/CIDR | SSH                                  |
+     | TCP   | 8080  | your IP/CIDR | Admin panel                          |
+     | TCP   | 8090  | your IP/CIDR | Beszel UI (if installed)             |
+
+   - Both Master and Caves shards have to be reachable from the internet.
+     Clients connect to Master on 10999; Caves 10998 is what teleports
+     players between surface and caves underneath. Skip the caves rules
+     and caves transitions silently break.
 
    - Linked Instances → add your VPS. Propagation is instant.
 
