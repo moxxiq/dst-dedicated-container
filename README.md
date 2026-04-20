@@ -1,9 +1,10 @@
 # Don't Starve Together dedicated server — container
 
 SteamCMD + the DST dedicated server (`app_id 343050`) in a single image, with:
+- Two-shard cluster: Master (overworld) + Caves (underground) launched together
 - `app_update` on every start (stays current with Klei patches)
-- Cloudflare R2 backup — inotify-triggered, 10 s debounced
-- Graceful `c_save()` + `c_shutdown()` on `podman stop`
+- Cloudflare R2 backup — inotify-triggered, 10 s debounced, covers both shards
+- Graceful `c_save()` + `c_shutdown()` on `podman stop`, routed to both shards
 - Workshop mod auto-update via `dedicated_server_mods_setup.lua`
 
 **Target:** x86_64 Linux VPS (Vultr is the reference). macOS Apple Silicon builds/mounts fine but cannot actually run Steam binaries (Rosetta + kernel bug, see Troubleshooting). Mac is for plumbing validation only.
@@ -29,11 +30,14 @@ steamCMD/
 ├── .env.example              # copy to .env and fill in (CLUSTER_TOKEN, R2_*, etc.)
 ├── saves/                    # bind-mounted at /home/ubuntu/.klei/DoNotStarveTogether
 │   └── qkation-cooperative/    # one subdir per cluster
-│       ├── cluster.ini
+│       ├── cluster.ini         # [SHARD] shard_enabled=true, master_ip=127.0.0.1, …
 │       ├── cluster_token.txt   # secret — or set $CLUSTER_TOKEN in .env
 │       ├── adminlist.txt       # KU_... IDs, one per line (admin web panel will edit this)
-│       └── Master/
-│           ├── server.ini
+│       ├── Master/             # overworld shard
+│       │   ├── server.ini      # is_master=true, name=Master, server_port=10999
+│       │   └── modoverrides.lua
+│       └── Caves/              # underground shard
+│           ├── server.ini      # is_master=false, name=Caves, server_port=10998
 │           └── modoverrides.lua
 └── mods/
     └── dedicated_server_mods_setup.lua    # ServerModSetup() list; entrypoint copies into DST install
@@ -113,16 +117,16 @@ If you want Mac-native steamcmd, OrbStack works (different runtime, ships its ow
 Three layers of save handling:
 
 1. **Host folder `./saves/`** — a normal directory; use any host tool (below).
-2. **Automatic R2 backups** — R2 is required; the entrypoint watches for every DST save (autosave, `c_save()`, day change) via inotify, debounces 10 s, tars the cluster, and uploads to:
+2. **Automatic R2 backups** — R2 is required; the entrypoint watches for every DST save across **both Master and Caves** shards (autosave, `c_save()`, day change) via inotify, debounces 10 s across both, tars the whole cluster (Master + Caves), and uploads to:
    - `r2://<bucket>/clusters/<cluster>/latest.tar.gz` (overwritten each time)
    - `r2://<bucket>/clusters/<cluster>/history/<ISO-timestamp>-<tag>.tar.gz` (kept)
 3. **Graceful-stop backup** — `./run-dst.sh stop` runs `c_save()` + `c_shutdown(true)` inside the server, waits for clean exit, then does a final R2 push tagged `shutdown`.
 
 **Fresh VPS, saves folder empty?**
 - If `clusters/<cluster>/latest.tar.gz` exists in R2 → entrypoint restores it automatically, then launches. No manual pull.
-- If R2 is empty too → entrypoint **waits** (5 s poll, heartbeat every 60 s) for the admin panel to provision the cluster. It does **not** auto-generate a fresh world. Two creation paths (Phase 3):
-  - **Upload cluster zip** — park-and-pick. The zip sits in `saves/<cluster>/` and the waiting container picks it up on the next poll.
-  - **Template-server wizard** — form (name, password, max players, game mode, pvp, description) → writes cluster.ini / server.ini / modoverrides.lua → container launches.
+- If R2 is empty too → entrypoint **waits** (5 s poll, heartbeat every 60 s) for the admin panel to provision the cluster. It does **not** auto-generate a fresh world. "Ready" means `cluster.ini` + `Master/server.ini` + `Caves/server.ini` all exist. Two creation paths (Phase 3):
+  - **Upload cluster zip** — park-and-pick. The zip sits in `saves/<cluster>/` (must include both `Master/` and `Caves/` subdirs) and the waiting container picks it up on the next poll.
+  - **Template-server wizard** — form (name, password, max players, game mode, pvp, description) → writes cluster.ini + both shards' server.ini / modoverrides.lua → container launches.
 
 Manual host-side shuffling still works:
 ```bash
@@ -277,9 +281,12 @@ $EDITOR .env                           # paste CLUSTER_TOKEN, R2_* secrets
 
 # 3. Open Vultr Cloud Firewall (in Vultr dashboard, not ufw):
 #    Firewall → your group → Add rule:
-#      UDP   10999    from anywhere    DST game
-#      UDP   8766     from anywhere    Steam auth
-#      UDP   27016    from anywhere    Steam master
+#      UDP   10999    from anywhere    DST Master (overworld) game
+#      UDP   10998    from anywhere    DST Caves game
+#      UDP   8766     from anywhere    Master Steam auth
+#      UDP   8768     from anywhere    Caves Steam auth
+#      UDP   27016    from anywhere    Master Steam master query
+#      UDP   27018    from anywhere    Caves Steam master query
 #      TCP   22       from your IP     SSH
 #      TCP   8080     from your IP     admin panel
 #      TCP   8090     from your IP     Beszel UI (if installed)

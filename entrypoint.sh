@@ -26,11 +26,15 @@
 # all depend on it. If you really want to run without offsite backup, fork and
 # strip the r2_require / do_backup / do_r2_restore_once calls yourself.
 #
-# Save backup trigger: inotifywait on the Master save dir (close_write, recursive),
-# 10-second debounce (kill+restart timer on each batch of writes).
+# Shards: DST clusters are two-shard by default — Master (overworld) + Caves
+# (underground). Both are launched as separate DST processes from the same
+# cluster dir. Each has its own stdin FIFO (fd 3 for Master, fd 4 for Caves).
 #
-# Graceful shutdown: on SIGTERM/SIGINT, write `c_save()` then `c_shutdown(true)` to
-# the server's stdin via a held-open FIFO (fd 3), wait for DST to exit, final R2 push.
+# Save backup trigger: inotifywait on BOTH Master/save and Caves/save
+# (close_write, recursive), 10-second debounce across both.
+#
+# Graceful shutdown: on SIGTERM/SIGINT, write `c_save()` then `c_shutdown(true)`
+# into both FIFOs, wait for both processes to exit, final R2 push.
 
 set -Eeuo pipefail
 
@@ -41,14 +45,17 @@ STEAM_HOME="${STEAM_HOME:-$HOME/.local/share/Steam}"
 DST_DIR="${DST_DIR:-$HOME/dst}"
 KLEI_DIR="${KLEI_DIR:-$HOME/.klei}"
 CLUSTER_DIR="$KLEI_DIR/DoNotStarveTogether/$CLUSTER_NAME"
-SAVE_SESSION_DIR="$CLUSTER_DIR/Master/save"
+MASTER_SAVE_DIR="$CLUSTER_DIR/Master/save"
+CAVES_SAVE_DIR="$CLUSTER_DIR/Caves/save"
 USER_MODS_SETUP="$HOME/user-mods/dedicated_server_mods_setup.lua"
 DST_MODS_SETUP="$DST_DIR/mods/dedicated_server_mods_setup.lua"
-FIFO=/tmp/dst.stdin
+MASTER_FIFO=/tmp/dst.master.stdin
+CAVES_FIFO=/tmp/dst.caves.stdin
 DST_BIN="$DST_DIR/bin64/dontstarve_dedicated_server_nullrenderer_x64"
 
 INOTIFY_PID=""
-DST_PID=""
+MASTER_PID=""
+CAVES_PID=""
 
 log() { printf '[entrypoint %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 
@@ -118,11 +125,14 @@ do_cluster_token() {
   fi
 }
 
-# DST needs at least cluster.ini + Master/server.ini to launch without generating
-# a new world. We treat anything less as "not ready" and refuse to auto-generate —
-# the admin panel (Phase 3) either uploads a zip or runs the template wizard.
+# DST needs cluster.ini + BOTH Master/server.ini and Caves/server.ini to launch
+# a two-shard cluster without generating a new world. We treat anything less as
+# "not ready" and refuse to auto-generate — the admin panel either uploads a
+# zip or runs the template wizard (which writes both shards' ini files).
 cluster_ready() {
-  [ -f "$CLUSTER_DIR/cluster.ini" ] && [ -f "$CLUSTER_DIR/Master/server.ini" ]
+  [ -f "$CLUSTER_DIR/cluster.ini" ] && \
+  [ -f "$CLUSTER_DIR/Master/server.ini" ] && \
+  [ -f "$CLUSTER_DIR/Caves/server.ini" ]
 }
 
 do_r2_restore_once() {
@@ -166,7 +176,9 @@ do_wait_for_cluster() {
   log "  - upload a cluster zip (park-and-pick), OR"
   log "  - run the template-server wizard"
   log ""
-  log "required files once provisioned: cluster.ini + Master/server.ini"
+  log "required files once provisioned:"
+  log "  cluster.ini + Master/server.ini + Caves/server.ini"
+  log "  (two-shard cluster — both Master and Caves must be present)"
   log "============================"
 
   local wait_ticks=0
@@ -213,10 +225,12 @@ export CLUSTER_NAME CLUSTER_DIR KLEI_DIR R2_ACCOUNT_ID R2_BUCKET \
 
 start_inotify_watcher() {
   # R2 presence is enforced by r2_require at launch — no soft-skip here.
-  mkdir -p "$SAVE_SESSION_DIR"
+  # Watches both shards' save dirs; a write to either one schedules a single
+  # debounced backup of the whole cluster (Master + Caves are tarred together).
+  mkdir -p "$MASTER_SAVE_DIR" "$CAVES_SAVE_DIR"
   (
     timer_pid=""
-    inotifywait -m -e close_write -r "$SAVE_SESSION_DIR" 2>/dev/null \
+    inotifywait -m -e close_write -r "$MASTER_SAVE_DIR" "$CAVES_SAVE_DIR" 2>/dev/null \
       | while read -r _ _ _; do
           if [ -n "$timer_pid" ] && kill -0 "$timer_pid" 2>/dev/null; then
             kill "$timer_pid" 2>/dev/null || true
@@ -226,29 +240,44 @@ start_inotify_watcher() {
         done
   ) &
   INOTIFY_PID=$!
-  log "save watcher started (PID $INOTIFY_PID), debounce 10s"
+  log "save watcher started (PID $INOTIFY_PID), debounce 10s, watching Master + Caves"
+}
+
+# Send c_save() + c_shutdown(true) to a single shard by writing into its FIFO.
+# $1 = shard label (for logging)
+# $2 = fd number to echo into (3 = master, 4 = caves)
+shard_soft_shutdown() {
+  local label="$1" fd="$2"
+  log "  → $label: c_save()"
+  eval "echo 'c_save()' >&$fd"   || true
+  sleep 2
+  log "  → $label: c_shutdown(true)"
+  eval "echo 'c_shutdown(true)' >&$fd" || true
+}
+
+# Wait up to $1 seconds for a PID to exit, escalating TERM then KILL if not.
+wait_or_kill() {
+  local label="$1" pid="$2" deadline="$3"
+  [ -n "$pid" ] || return 0
+  for _ in $(seq 1 "$deadline"); do
+    kill -0 "$pid" 2>/dev/null || return 0
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    log "$label (PID $pid) didn't exit within ${deadline}s — sending TERM"
+    kill -TERM "$pid" 2>/dev/null || true
+    sleep 5
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
 }
 
 graceful_stop() {
-  log "signal received — initiating graceful shutdown"
-  # Fire `c_save()` then `c_shutdown(true)` into DST's stdin FIFO.
-  if [ -w "$FIFO" ] || [ -p "$FIFO" ]; then
-    echo 'c_save()'         >&3 || true
-    sleep 3
-    echo 'c_shutdown(true)' >&3 || true
-  fi
-  if [ -n "${DST_PID:-}" ]; then
-    for _ in $(seq 1 60); do
-      kill -0 "$DST_PID" 2>/dev/null || break
-      sleep 1
-    done
-    if kill -0 "$DST_PID" 2>/dev/null; then
-      log "DST didn't exit within 60s — sending TERM"
-      kill -TERM "$DST_PID" 2>/dev/null || true
-      sleep 5
-      kill -KILL "$DST_PID" 2>/dev/null || true
-    fi
-  fi
+  log "signal received — initiating graceful shutdown of both shards"
+  shard_soft_shutdown Master 3
+  shard_soft_shutdown Caves  4
+  # Give both shards up to 60s to flush saves and exit on their own.
+  wait_or_kill Master "${MASTER_PID:-}" 60
+  wait_or_kill Caves  "${CAVES_PID:-}"  60
   [ -n "${INOTIFY_PID:-}" ] && kill "$INOTIFY_PID" 2>/dev/null || true
   do_backup shutdown || true
   exit 0
@@ -276,34 +305,65 @@ launch_dst() {
   do_wait_for_cluster
   do_cluster_token
 
-  rm -f "$FIFO"
-  mkfifo "$FIFO"
-  # Open the write end in this shell and keep it open (fd 3).
-  # Without a writer held open, the server's read end would hit EOF immediately.
-  exec 3> "$FIFO"
+  # FIFO per shard so we can route c_save/c_shutdown to each independently.
+  # Each write end is held open in this shell (fds 3 and 4) — without a held
+  # writer, the server's read end hits EOF immediately on first line.
+  rm -f "$MASTER_FIFO" "$CAVES_FIFO"
+  mkfifo "$MASTER_FIFO" "$CAVES_FIFO"
+  exec 3> "$MASTER_FIFO"
+  exec 4> "$CAVES_FIFO"
 
   start_inotify_watcher
   trap graceful_stop TERM INT
 
-  log "launching DST (cluster=$CLUSTER_NAME, shard=Master)"
   cd "$DST_DIR/bin64"
+
+  log "launching DST shard=Master (cluster=$CLUSTER_NAME)"
   ./dontstarve_dedicated_server_nullrenderer_x64 \
     -persistent_storage_root "$KLEI_DIR" \
     -conf_dir DoNotStarveTogether \
     -cluster "$CLUSTER_NAME" \
     -shard Master \
-    < "$FIFO" &
-  DST_PID=$!
-  log "DST started (PID $DST_PID)"
+    < "$MASTER_FIFO" &
+  MASTER_PID=$!
+  log "Master shard started (PID $MASTER_PID)"
 
-  wait "$DST_PID" || DST_RC=$?
-  DST_RC="${DST_RC:-0}"
-  log "DST exited with code $DST_RC"
+  log "launching DST shard=Caves (cluster=$CLUSTER_NAME)"
+  ./dontstarve_dedicated_server_nullrenderer_x64 \
+    -persistent_storage_root "$KLEI_DIR" \
+    -conf_dir DoNotStarveTogether \
+    -cluster "$CLUSTER_NAME" \
+    -shard Caves \
+    < "$CAVES_FIFO" &
+  CAVES_PID=$!
+  log "Caves shard started (PID $CAVES_PID)"
+
+  # Block until EITHER shard exits. The master is authoritative: if it leaves,
+  # we tear the whole cluster down. If caves crash on their own, master will
+  # typically survive — in that case we escalate to a full shutdown anyway so
+  # `podman restart` can bring up a known-good state.
+  wait -n "$MASTER_PID" "$CAVES_PID" || true
+  if ! kill -0 "$MASTER_PID" 2>/dev/null; then
+    log "Master shard exited — shutting Caves down"
+    shard_soft_shutdown Caves 4
+    wait_or_kill Caves "$CAVES_PID" 60
+  elif ! kill -0 "$CAVES_PID" 2>/dev/null; then
+    log "Caves shard exited — shutting Master down"
+    shard_soft_shutdown Master 3
+    wait_or_kill Master "$MASTER_PID" 60
+  fi
+
+  # Collect exit codes. Whichever shard exited first is the "cause"; prefer
+  # its non-zero rc over the one we sent a graceful_shutdown to.
+  wait "$MASTER_PID" 2>/dev/null; MASTER_RC=$?
+  wait "$CAVES_PID"  2>/dev/null; CAVES_RC=$?
+  log "Master exited rc=$MASTER_RC, Caves exited rc=$CAVES_RC"
 
   [ -n "${INOTIFY_PID:-}" ] && kill "$INOTIFY_PID" 2>/dev/null || true
   # Best-effort crash-path backup.
   do_backup exit || true
-  exit "$DST_RC"
+  if [ "$MASTER_RC" -ne 0 ]; then exit "$MASTER_RC"; fi
+  exit "$CAVES_RC"
 }
 
 cmd="${1:-dst}"
