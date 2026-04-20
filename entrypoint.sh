@@ -2,10 +2,16 @@
 # entrypoint.sh — orchestrator for SteamCMD / DST dedicated server.
 #
 # Dispatch (first argument):
-#   dst           → full DST lifecycle (update → mods → restore → launch → backup → graceful stop)
+#   dst           → full DST lifecycle (update → mods → restore-or-wait → launch → backup → graceful stop)
 #   steamcmd ...  → pass-through (ad-hoc SteamCMD invocation)
 #   bash | sh     → pass-through (interactive debug)
 #   <anything>    → pass-through (exec as-is)
+#
+# Fresh-boot policy (2026-04-20): if the local cluster dir is empty AND there is
+# no R2 backup, the entrypoint WAITS (polls every 5 s, heartbeat every 60 s)
+# for the admin panel to either upload a cluster zip or run the template wizard.
+# It does NOT auto-generate a fresh world. This avoids shipping a random world
+# under the user's chosen cluster name when their intent is to pick/create one.
 #
 # Environment (all optional unless noted):
 #   CLUSTER_NAME            Cluster folder name.                        Default: qkation-cooperative
@@ -90,16 +96,16 @@ do_cluster_token() {
   fi
 }
 
-do_restore_if_empty() {
-  if [ -d "$CLUSTER_DIR" ] && [ -n "$(ls -A "$CLUSTER_DIR" 2>/dev/null)" ]; then
-    log "cluster dir populated — skipping R2 restore"
-    return 0
-  fi
-  if ! r2_configured; then
-    log "cluster dir empty, R2 not configured — fresh world will be generated"
-    return 0
-  fi
-  log "cluster dir empty — attempting R2 restore"
+# DST needs at least cluster.ini + Master/server.ini to launch without generating
+# a new world. We treat anything less as "not ready" and refuse to auto-generate —
+# the admin panel (Phase 3) either uploads a zip or runs the template wizard.
+cluster_ready() {
+  [ -f "$CLUSTER_DIR/cluster.ini" ] && [ -f "$CLUSTER_DIR/Master/server.ini" ]
+}
+
+do_r2_restore_once() {
+  r2_configured || return 1
+  log "cluster missing locally — attempting R2 restore"
   r2_rclone_env
   mkdir -p "$KLEI_DIR/DoNotStarveTogether"
   local tmp=/tmp/restore.tar.gz
@@ -107,9 +113,48 @@ do_restore_if_empty() {
     tar xzf "$tmp" -C "$KLEI_DIR/DoNotStarveTogether/"
     rm -f "$tmp"
     log "restored cluster from R2 (latest.tar.gz)"
-  else
-    log "no R2 backup at clusters/$CLUSTER_NAME/latest.tar.gz — fresh world"
+    return 0
   fi
+  rm -f "$tmp"
+  log "no R2 backup at clusters/$CLUSTER_NAME/latest.tar.gz"
+  return 1
+}
+
+# Policy (2026-04-20, per user): do NOT auto-generate a fresh world when both
+# local saves and R2 are empty. Wait indefinitely for the admin panel to either
+#   (a) drop in an uploaded cluster zip (park-and-pick), or
+#   (b) run the template-server wizard to populate saves/<cluster>/.
+# Container stays alive with clear status output; `podman logs -f` shows progress.
+do_wait_for_cluster() {
+  if cluster_ready; then
+    log "cluster '$CLUSTER_NAME' present locally — skipping R2/wait"
+    return 0
+  fi
+
+  do_r2_restore_once || true
+  cluster_ready && return 0
+
+  log "=== WAITING FOR CLUSTER ==="
+  log "cluster '$CLUSTER_NAME' not found locally ($CLUSTER_DIR)"
+  log "and no backup in R2 at clusters/$CLUSTER_NAME/latest.tar.gz"
+  log ""
+  log "container will wait until the admin panel provisions a cluster:"
+  log "  - upload a cluster zip (park-and-pick), OR"
+  log "  - run the template-server wizard"
+  log ""
+  log "required files once provisioned: cluster.ini + Master/server.ini"
+  log "============================"
+
+  local wait_ticks=0
+  while ! cluster_ready; do
+    sleep 5
+    wait_ticks=$((wait_ticks + 1))
+    # Heartbeat log every 60 s.
+    if [ $((wait_ticks % 12)) -eq 0 ]; then
+      log "still waiting for cluster at $CLUSTER_DIR (elapsed $((wait_ticks * 5))s)"
+    fi
+  done
+  log "cluster detected — proceeding with launch"
 }
 
 do_backup() {
@@ -204,7 +249,7 @@ launch_dst() {
   fi
 
   do_mods_sync
-  do_restore_if_empty
+  do_wait_for_cluster
   do_cluster_token
 
   rm -f "$FIFO"

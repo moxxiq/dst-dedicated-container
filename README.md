@@ -115,7 +115,11 @@ Three layers of save handling:
    - `r2://<bucket>/clusters/<cluster>/history/<ISO-timestamp>-<tag>.tar.gz` (kept)
 3. **Graceful-stop backup** — `./run-dst.sh stop` runs `c_save()` + `c_shutdown(true)` inside the server, waits for clean exit, then does a final R2 push tagged `shutdown`.
 
-**Fresh VPS, saves folder empty?** On launch, if R2 is configured and `./saves/<cluster>/` is empty, the entrypoint restores from `latest.tar.gz` automatically. No manual pull.
+**Fresh VPS, saves folder empty?**
+- If R2 is configured and `clusters/<cluster>/latest.tar.gz` exists → entrypoint restores it automatically, then launches. No manual pull.
+- If R2 is empty too → entrypoint **waits** (5 s poll, heartbeat every 60 s) for the admin panel to provision the cluster. It does **not** auto-generate a fresh world. Two creation paths (Phase 3):
+  - **Upload cluster zip** — park-and-pick. The zip sits in `saves/<cluster>/` and the waiting container picks it up on the next poll.
+  - **Template-server wizard** — form (name, password, max players, game mode, pvp, description) → writes cluster.ini / server.ini / modoverrides.lua → container launches.
 
 Manual host-side shuffling still works:
 ```bash
