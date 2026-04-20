@@ -1,6 +1,16 @@
 saves/
+parked/
 .env
 .env.*
 !.env.example
 *.tmp
 .DS_Store
+
+# Python bytecode from the admin panel
+__pycache__/
+*.pyc
+*.pyo
+
+# Non-interactive bootstrap vars (secrets — user creates from bootstrap.vars.example)
+bootstrap/bootstrap.vars
+bootstrap.vars

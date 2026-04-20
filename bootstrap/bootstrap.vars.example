@@ -1,0 +1,42 @@
+# bootstrap.vars.example — non-interactive DST bootstrap configuration.
+#
+# HOW TO USE (SSH):
+#   1. Copy this file:  cp bootstrap/bootstrap.vars.example bootstrap.vars
+#   2. Fill in every value below.
+#   3. Run the bootstrap:
+#
+#        curl -fsSL \
+#          https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh \
+#          -o bootstrap.sh
+#        chmod +x bootstrap.sh
+#        sudo ./bootstrap.sh --vars bootstrap.vars
+#
+# Or source it yourself before running:
+#        source bootstrap.vars
+#        sudo ./bootstrap.sh
+#
+# WARNING: This file contains secrets — do NOT commit it to git.
+#          bootstrap.vars (without .example) is in .gitignore.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Name shown in the DST server browser.
+CLUSTER_NAME="qkation-cooperative"
+
+# Klei cluster token.
+# Get it at: https://accounts.klei.com/account/game/servers → Add New Server
+CLUSTER_TOKEN=""
+
+# Admin panel credentials (web UI on :8080).
+ADMIN_USER="admin"
+ADMIN_PASSWORD=""         # min 8 characters
+
+# Cloudflare R2 — REQUIRED. DST refuses to launch without all four values.
+# Create a bucket + API token at https://dash.cloudflare.com/?to=/:account/r2
+# Token needs "Object Read & Write" scope on the bucket.
+R2_ACCOUNT_ID=""          # shown top-right on the R2 overview page
+R2_BUCKET=""              # the bucket name you created
+R2_ACCESS_KEY_ID=""       # from Manage API tokens → Create token
+R2_SECRET_ACCESS_KEY=""   # same token creation dialog
+
+# Set to "y" to also install Beszel monitoring on :8090, "n" to skip.
+INSTALL_BESZEL="n"
