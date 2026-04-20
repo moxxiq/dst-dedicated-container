@@ -247,7 +247,19 @@ The token is a secret. Don't commit `saves/` to git (the included `.gitignore` a
 
 ## VPS deployment (Vultr)
 
-Quick-start on a fresh x86_64 Vultr VPS (full automated bootstrap is Phase 5):
+### Fastest path: one-shot bootstrap
+
+On a fresh Ubuntu 22.04 / 24.04 Vultr VPS, as root:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh -o bootstrap.sh
+chmod +x bootstrap.sh
+sudo ./bootstrap.sh
+```
+
+Prompts for admin password, cluster token, and R2 keys; installs podman, clones the repo, builds images, and brings up DST + admin panel (+ optional Beszel). See [`bootstrap/README.md`](./bootstrap/README.md) for the firewall rules it tells Vultr to enforce and the re-provisioning flow.
+
+### Manual path
 
 ```bash
 # 1. Install podman, git:
@@ -266,7 +278,8 @@ $EDITOR .env                           # paste CLUSTER_TOKEN, R2_* secrets
 #      UDP   8766     from anywhere    Steam auth
 #      UDP   27016    from anywhere    Steam master
 #      TCP   22       from your IP     SSH
-#    (Phase 3 adds TCP 8080 for the admin panel; Phase 4 adds TCP 8090 for Beszel.)
+#      TCP   8080     from your IP     admin panel
+#      TCP   8090     from your IP     Beszel UI (if installed)
 
 # 4. Build and launch:
 podman build --platform=linux/amd64 -t local/steamcmd:latest .
