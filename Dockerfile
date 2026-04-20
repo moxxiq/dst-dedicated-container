@@ -3,7 +3,7 @@
 #
 # Note on users: this tag ships with `ubuntu` (UID 1000) and no `steam` user.
 # We use `ubuntu` — UID 1000 matches typical host users and keeps bind-mount perms sane.
-FROM --platform=linux/amd64 steamcmd/steamcmd:ubuntu-24
+FROM --platform=linux/amd64 docker.io/steamcmd/steamcmd:ubuntu-24
 
 USER root
 
