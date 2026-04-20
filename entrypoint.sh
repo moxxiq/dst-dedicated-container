@@ -13,14 +13,18 @@
 # It does NOT auto-generate a fresh world. This avoids shipping a random world
 # under the user's chosen cluster name when their intent is to pick/create one.
 #
-# Environment (all optional unless noted):
+# Environment:
 #   CLUSTER_NAME            Cluster folder name.                        Default: qkation-cooperative
 #   CLUSTER_TOKEN           If set and cluster_token.txt is empty, write it.
 #   AUTO_UPDATE             "1" to run app_update 343050 on every start. Default: 1
-#   R2_ACCOUNT_ID           Cloudflare R2 account ID. Unset → R2 features off.
-#   R2_BUCKET               R2 bucket name.
-#   R2_ACCESS_KEY_ID        R2 API key.
-#   R2_SECRET_ACCESS_KEY    R2 API secret.
+#   R2_ACCOUNT_ID           Cloudflare R2 account ID.      REQUIRED — container exits if missing.
+#   R2_BUCKET               R2 bucket name.                REQUIRED.
+#   R2_ACCESS_KEY_ID        R2 API key.                    REQUIRED.
+#   R2_SECRET_ACCESS_KEY    R2 API secret.                 REQUIRED.
+#
+# R2 is not optional: saves, restores, and the first-boot wait-for-cluster path
+# all depend on it. If you really want to run without offsite backup, fork and
+# strip the r2_require / do_backup / do_r2_restore_once calls yourself.
 #
 # Save backup trigger: inotifywait on the Master save dir (close_write, recursive),
 # 10-second debounce (kill+restart timer on each batch of writes).
@@ -51,6 +55,24 @@ log() { printf '[entrypoint %s] %s\n' "$(date -u +%H:%M:%S)" "$*" >&2; }
 r2_configured() {
   [ -n "${R2_ACCOUNT_ID:-}" ] && [ -n "${R2_BUCKET:-}" ] && \
   [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ]
+}
+
+# Fail fast before doing anything expensive (app_update, tar, etc.) if R2
+# isn't configured. Called once from launch_dst. Emits a list of which
+# specific vars are missing so the operator can fix the .env in one pass.
+r2_require() {
+  if r2_configured; then
+    return 0
+  fi
+  log "ERROR: Cloudflare R2 is required but not fully configured."
+  local v
+  for v in R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
+    if [ -z "${!v:-}" ]; then
+      log "  missing: $v"
+    fi
+  done
+  log "set all four in .env (see .env.example) and restart the container."
+  exit 1
 }
 
 r2_rclone_env() {
@@ -104,6 +126,8 @@ cluster_ready() {
 }
 
 do_r2_restore_once() {
+  # R2 is guaranteed configured by launch_dst → r2_require. This function is
+  # also callable from debug shells; guard left in for that edge case.
   r2_configured || return 1
   log "cluster missing locally — attempting R2 restore"
   r2_rclone_env
@@ -159,9 +183,9 @@ do_wait_for_cluster() {
 
 do_backup() {
   local tag="${1:-auto}"
-  if ! r2_configured; then
-    return 0
-  fi
+  # R2 is guaranteed configured by r2_require at launch. If an operator calls
+  # do_backup by hand from a debug shell with a stripped env, fall through to
+  # rclone which will error loudly — that's acceptable for an ad-hoc path.
   if [ ! -d "$CLUSTER_DIR" ]; then
     log "no cluster dir yet, skipping backup"
     return 0
@@ -188,10 +212,7 @@ export CLUSTER_NAME CLUSTER_DIR KLEI_DIR R2_ACCOUNT_ID R2_BUCKET \
        R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
 
 start_inotify_watcher() {
-  if ! r2_configured; then
-    log "R2 not configured — save watcher disabled"
-    return 0
-  fi
+  # R2 presence is enforced by r2_require at launch — no soft-skip here.
   mkdir -p "$SAVE_SESSION_DIR"
   (
     timer_pid=""
@@ -234,6 +255,9 @@ graceful_stop() {
 }
 
 launch_dst() {
+  # R2 is mandatory. Fail before doing any work if the operator forgot a key.
+  r2_require
+
   if [ ! -x "$DST_BIN" ]; then
     log "DST binary missing — forcing first-time app_update"
     do_app_update
