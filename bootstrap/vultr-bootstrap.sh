@@ -8,8 +8,10 @@
 #   sudo ./bootstrap.sh
 #
 # The script prompts interactively for secrets (admin panel password, Klei
-# cluster token, optional Cloudflare R2 keys). Nothing is baked into this
-# file — it's safe to commit and safe to rerun.
+# cluster token, Cloudflare R2 keys). Nothing is baked into this file —
+# it's safe to commit and safe to rerun. R2 is required: the DST container
+# won't launch without it (backups, restores, and first-boot recovery all
+# flow through R2).
 #
 # After it finishes you'll have:
 #   - A `dst` Linux user owning ~/steamCMD
@@ -55,11 +57,16 @@ while :; do
   break
 done
 
-say "Cloudflare R2 backup (optional — press Enter on all four to skip)"
-read -r -u3 -p "R2 account ID:       " R2_ACCOUNT_ID
-read -r -u3 -p "R2 bucket:           " R2_BUCKET
-read -r -u3 -p "R2 access key ID:    " R2_ACCESS_KEY_ID
-read -r -u3 -s -p "R2 secret key:       " R2_SECRET_ACCESS_KEY; echo
+say "Cloudflare R2 backup (REQUIRED — DST refuses to launch without it)"
+cat >&2 <<'R2NOTE'
+  Create a bucket + API token at https://dash.cloudflare.com/?to=/:account/r2
+  The token needs Object Read & Write scope on your bucket.
+R2NOTE
+while :; do read -r -u3 -p    "R2 account ID:    " R2_ACCOUNT_ID;          [[ -n "$R2_ACCOUNT_ID"        ]] && break; warn "required."; done
+while :; do read -r -u3 -p    "R2 bucket:        " R2_BUCKET;              [[ -n "$R2_BUCKET"            ]] && break; warn "required."; done
+while :; do read -r -u3 -p    "R2 access key ID: " R2_ACCESS_KEY_ID;       [[ -n "$R2_ACCESS_KEY_ID"     ]] && break; warn "required."; done
+while :; do read -r -u3 -s -p "R2 secret key:    " R2_SECRET_ACCESS_KEY; echo
+            [[ -n "$R2_SECRET_ACCESS_KEY" ]] && break; warn "required."; done
 
 read -r -u3 -p "Also install Beszel monitoring (:8090)? [y/N]: " INSTALL_BESZEL
 INSTALL_BESZEL="${INSTALL_BESZEL,,}"  # lowercase

@@ -34,11 +34,14 @@ Beszel monitoring) in under ten minutes, most of it image build time.
    - https://accounts.klei.com/account/game/servers → **Add New Server**
      → copy the token. You'll paste it into the script prompt.
 
-4. *(Optional)* **Create a Cloudflare R2 bucket + API token**
+4. **Create a Cloudflare R2 bucket + API token** *(required)*
    - R2 → Create bucket (any name, any region; "auto" works fine).
    - R2 → Manage API tokens → Create token with **Object Read & Write**.
    - You'll need: account ID, bucket name, access key ID, secret access
      key.
+   - R2 is not optional. DST saves, restores, and first-boot cluster
+     recovery all go through R2; the container refuses to launch if any
+     of the four values is missing.
 
 ## Running the bootstrap
 
@@ -56,8 +59,8 @@ The script asks for:
 - **Klei cluster token**
 - **Admin panel username** (defaults to `admin`)
 - **Admin panel password** (typed twice, minimum 8 chars)
-- **Cloudflare R2** account ID / bucket / keys (press Enter on all four
-  to skip R2 backup)
+- **Cloudflare R2** account ID / bucket / access key ID / secret
+  (all four required — the script re-prompts on empty input)
 - **Beszel monitoring** y/N
 
 It then:
