@@ -13,6 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       locales \
       procps \
       curl \
+      rclone \
+      inotify-tools \
  && locale-gen en_US.UTF-8 \
  && rm -rf /var/lib/apt/lists/*
 
@@ -27,8 +29,10 @@ RUN install -d -o ubuntu -g ubuntu \
       "$STEAM_HOME" \
       "$DST_DIR" \
       "$KLEI_DIR" \
+      "$KLEI_DIR/DoNotStarveTogether" \
       /home/ubuntu/.steam \
       /home/ubuntu/Steam/logs \
+      /home/ubuntu/user-mods \
     # Some steamcmd internals hardcode $HOME/Steam/logs/stderr.txt; pre-create it.
     && ln -sf "$STEAM_HOME" /home/ubuntu/.steam/root \
     && ln -sf "$STEAM_HOME" /home/ubuntu/.steam/steam
@@ -40,4 +44,6 @@ USER ubuntu
 WORKDIR /home/ubuntu
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/entrypoint.sh"]
-CMD ["steamcmd", "+quit"]
+# Default: run the full DST lifecycle. Override with `steamcmd +quit` for a smoke test,
+# or `bash` for an interactive shell.
+CMD ["dst"]

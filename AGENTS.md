@@ -126,20 +126,68 @@ Either works. User preference (2026-04-18): keep a single-file launch path as a 
 - [x] ~~Podman vs Docker Desktop~~ — **Podman 5.8.1 already installed** at `/opt/podman/bin/podman`, machine running (libkrun, 8 CPU / 15 GiB / 87 GiB).
 - [x] ~~Steam account~~ — **anonymous** (DST cluster token model).
 - [x] ~~Save-folder strategy~~ — **bind mount** to a user-chosen host folder (default `./saves`).
-- [x] ~~Cluster token~~ — provided 2026-04-18, stored at `saves/qkation-cooperative/cluster_token.txt`. Cluster "qkation-cooperative", password "qkation-cooperative", 6 players, relaxed/cooperative. Token was pasted in chat — user aware, can rotate at klei.com/account.
-- [ ] VPS target: x86_64 (fast path) or ARM (emulated, discouraged for DST)?
 
-## Cluster + mod file layout (reference)
+---
 
+## Phase 1 architecture (DST baked in, 2026-04-20)
+
+**Stack split (user-directed):**
+- DST dedicated server → standalone `podman run` via `run-dst.sh`, built from this Dockerfile. Not in compose.
+- Admin web panel (FastAPI, Phase 3) + Beszel monitoring (Phase 4) → their own compose stack in a sibling folder (not yet written).
+- `docker-compose.yml` retained but demoted to dev convenience (smoke tests, interactive debug).
+
+**VPS target (user-directed):** Vultr. No UFW — Vultr Cloud Firewall groups. Backups + state secrets on Cloudflare R2.
+
+**Entrypoint responsibilities** (replaced the old `exec "$@"`):
+1. Dispatch on first arg: `dst` → full lifecycle, anything else → passthrough (keeps image useful for ad-hoc `steamcmd`/`bash`).
+2. `dst` lifecycle:
+   - `steamcmd +app_update 343050 validate` on every start if `AUTO_UPDATE=1` (Klei pushes patches; mismatched servers can't accept players).
+   - Copy `user-mods/dedicated_server_mods_setup.lua` into `$DST_DIR/mods/` (bind-mount target is a separate dir, not the DST install itself, to avoid clobbering the named volume).
+   - If cluster dir is empty and R2 is configured, `rclone copyto r2:.../latest.tar.gz` + extract. Otherwise let DST generate a fresh world.
+   - If `$CLUSTER_TOKEN` is set and `cluster_token.txt` is empty, write the file.
+   - Start `inotifywait -m -e close_write -r <save_session_dir>` with a 10s kill-and-restart debounce. Each debounce tick: `tar cz + rclone copyto` to `clusters/<cluster>/latest.tar.gz` plus a timestamped `history/<ts>-<tag>.tar.gz`.
+   - Launch DST reading from a FIFO (`/tmp/dst.stdin`); the entrypoint holds the write end open via `exec 3>`.
+   - On SIGTERM/SIGINT: write `c_save()` then `c_shutdown(true)` into fd 3, wait up to 60s, escalate to KILL if needed, kill inotify watcher, do one final R2 push.
+
+**Backup trigger decision (2026-04-20, per user):** inotify only. **No** safety-net cron. Rationale: every real autosave + every `c_save()` already fires inotify; a cron would just duplicate uploads. If DST goes silent for hours (no saves written), that's itself a signal something's wrong, not something to paper over.
+
+**Save-path bug fix (2026-04-20):** old bind was `./saves → /home/ubuntu/.klei`, which required launching DST with a non-default `-conf_dir .` to find `./saves/<cluster>/`. Fixed: bind is now `./saves → /home/ubuntu/.klei/DoNotStarveTogether`. Host layout stays `./saves/<cluster>/`; DST's default `-conf_dir DoNotStarveTogether` resolves correctly.
+
+**Mods bind-mount fix (2026-04-20):** old bind was `./mods → /home/ubuntu/dst-mods`, which DST ignored (it reads from `$DST_DIR/mods/`). Fixed: bind is now `./mods → /home/ubuntu/user-mods` (a neutral staging dir), and entrypoint copies `dedicated_server_mods_setup.lua` into the DST install at launch. Avoids clobbering the `dst-server` named volume.
+
+**Secret flow (2026-04-20, per user):**
+- First VPS boot: user SSHes in, runs interactive bootstrap, fills `.env` (cluster token, R2 creds, admin password). `.env` never leaves the VPS.
+- Going forward: Phase 3 admin panel regenerates a downloadable bootstrap script (with `.env` baked in) for re-provisioning.
+- `CLUSTER_TOKEN` in `.env` → entrypoint writes `cluster_token.txt` if missing. Either-or: keep token in file OR env, not both.
+
+**Backup object layout in R2** (confirmed with user):
 ```
-./saves/qkation-cooperative/
-  cluster.ini              # cluster-wide config (see Cluster info table)
-  cluster_token.txt        # secret from klei.com/account — DO NOT COMMIT
-  Master/
-    server.ini             # shard config (master shard only — caves disabled)
-    modoverrides.lua       # per-shard mod enable + configuration_options
-./mods/
-  dedicated_server_mods_setup.lua   # ServerModSetup() calls — what to download
+r2://<bucket>/
+  clusters/<cluster>/
+    latest.tar.gz                ← overwritten every save
+    history/<ts>-<tag>.tar.gz    ← kept, retention TBD
+  parked/                        ← Phase 3: zips uploaded via web panel
+  env/                           ← Phase 3: regeneratable bootstrap.env
 ```
 
-**Mods need TWO entries** to work: a `ServerModSetup(id)` in `dedicated_server_mods_setup.lua` (downloads from Workshop) AND an `["workshop-<id>"] = { enabled = true, ... }` entry in `modoverrides.lua` (enables + configures in the world).
+**Graceful-stop timing:** `run-dst.sh` uses `--stop-timeout 90` so `podman stop` gives the entrypoint's trap enough headroom for `c_save()` + `c_shutdown()` + final R2 push before SIGKILL.
+
+**Research references (Phase 0, 2026-04-20):**
+- DST app_id = 343050, anonymous login, `force_install_dir + app_update + validate + quit` is the canonical invocation.
+- `dedicated_server_mods_setup.lua` re-read on every boot; DST handles Workshop version deltas itself (no special flag).
+- No reliable single-line "save success" log marker documented by Klei. inotify on the save tree is the honest signal.
+- Beszel defaults: hub on :8090, agent on :45876; 150–180 MB RAM total.
+
+---
+
+## User preferences / corrections log (Phase 1 additions)
+
+- **2026-04-20** — Vultr Cloud Firewall only; do NOT install UFW. **Why:** user runs Vultr and already has their own firewall conventions at the cloud level. Two firewalls = more breakage surface. **How to apply:** `REQUIREMENTS.md`'s UFW recipe is for non-Vultr deployments; Phase 5 bootstrap script must NOT install or enable UFW.
+- **2026-04-20** — R2 only; no S3/Backblaze. **Why:** user's existing stack. **How to apply:** rclone config uses S3-compatible endpoint `https://<account>.r2.cloudflarestorage.com`, provider = Cloudflare, region = auto.
+- **2026-04-20** — DST runs via `podman run` (not compose). Compose is reserved for admin panel + Beszel. **Why:** user directive "on dedicated server use dockerfile separately, on monitoring/webserver use compose". **How to apply:** keep `run-dst.sh` authoritative; `docker-compose.yml` stays for dev convenience but is not the production path.
+- **2026-04-20** — FastAPI for the admin panel, not Flask. **Why:** user preference for modern stack.
+- **2026-04-20** — Admin panel password is interactive during bootstrap, not passed via Vultr user-data. **Why:** Vultr's startup script field is visible in the dashboard forever; that's the wrong place for secrets.
+- **2026-04-20** — Cluster uploads are "park-and-pick" (zip sits next to current cluster, user chooses which to launch). **Why:** forgiving UX; accidental upload doesn't nuke the running world.
+- **2026-04-20** — adminlist.txt is KU_ ID only (no name labels). **Why:** user choice; keeps the file DST-native without wrapper tooling.
+- **2026-04-20** — Backup trigger is inotify only; no cron safety net. **Why:** redundant uploads without real signal value. **How to apply:** entrypoint's `start_inotify_watcher` is the single trigger.
+
