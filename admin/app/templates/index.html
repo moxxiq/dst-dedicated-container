@@ -16,13 +16,27 @@
       <span class="pill {{ 'ok' if cluster_ready else 'warn' }}">
         Cluster: {{ 'ready' if cluster_ready else ('empty' if not cluster_exists else 'incomplete') }}
       </span>
-      <span class="pill {{ 'ok' if r2_ready else 'muted' }}">
-        R2: {{ 'configured' if r2_ready else 'off' }}
+      <span class="pill {{ 'ok' if r2_ready else 'err' }}">
+        R2: {{ 'configured' if r2_ready else 'NOT SET' }}
       </span>
     </div>
   </header>
 
   <main>
+
+    {% if not r2_ready %}
+    <section class="banner-err">
+      <h2>Cloudflare R2 is required — DST will refuse to start</h2>
+      <p>The entrypoint exits on launch if any of
+        <code>R2_ACCOUNT_ID</code>, <code>R2_BUCKET</code>,
+        <code>R2_ACCESS_KEY_ID</code>, or <code>R2_SECRET_ACCESS_KEY</code>
+        is empty. Edit <code>.env</code> on the host, fill in all four
+        values from your Cloudflare R2 dashboard, and restart the
+        container (<code>./run-dst.sh restart</code> or <em>Restart</em>
+        above). Backups, restores, and first-boot recovery all depend
+        on R2.</p>
+    </section>
+    {% endif %}
 
     <section>
       <h2>Server control</h2>
