@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DST admin — {{ cluster_name }}</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}" />
+</head>
+<body>
+  <header>
+    <h1>DST admin <small>· {{ cluster_name }}</small></h1>
+    <div class="status">
+      <span class="pill {{ 'ok' if dst.state == 'running' else 'warn' }}">
+        DST: {{ dst.state }}
+      </span>
+      <span class="pill {{ 'ok' if cluster_ready else 'warn' }}">
+        Cluster: {{ 'ready' if cluster_ready else ('empty' if not cluster_exists else 'incomplete') }}
+      </span>
+      <span class="pill {{ 'ok' if r2_ready else 'muted' }}">
+        R2: {{ 'configured' if r2_ready else 'off' }}
+      </span>
+    </div>
+  </header>
+
+  <main>
+
+    <section>
+      <h2>Server control</h2>
+      <form method="post" action="/server/start" class="inline"><button type="submit">Start</button></form>
+      <form method="post" action="/server/stop" class="inline"><button type="submit" class="warn">Graceful stop</button></form>
+      <form method="post" action="/server/restart" class="inline"><button type="submit">Restart</button></form>
+      <form method="post" action="/backup/trigger" class="inline"><button type="submit">Backup to R2 now</button></form>
+      <p class="muted">Graceful stop: c_save() → c_shutdown(true) → final R2 push. Up to 90 s.</p>
+    </section>
+
+    {% if not cluster_ready %}
+    <section>
+      <h2>Create a cluster (no active cluster yet)</h2>
+      <p class="muted">DST is waiting. Upload a zip or use the template wizard below to start.</p>
+    </section>
+    {% endif %}
+
+    <section>
+      <h2>Template wizard</h2>
+      <form method="post" action="/cluster/template">
+        <label>Cluster name <input name="cluster_name" value="{{ cluster_name }}" required /></label>
+        <label>Password <input name="password" value="{{ cluster_name }}" /></label>
+        <label>Max players <input type="number" name="max_players" value="6" min="1" max="64" /></label>
+        <label>Game mode
+          <select name="game_mode">
+            <option value="relaxed" selected>relaxed</option>
+            <option value="survival">survival</option>
+            <option value="endless">endless</option>
+            <option value="wilderness">wilderness</option>
+          </select>
+        </label>
+        <label class="checkbox"><input type="checkbox" name="pvp" /> PvP</label>
+        <label>Description <input name="description" value="Friendly cooperative world." /></label>
+        <label>Target
+          <select name="target">
+            <option value="active" {% if not cluster_exists %}selected{% endif %}>active (write now)</option>
+            <option value="parked" {% if cluster_exists %}selected{% endif %}>parked (activate later)</option>
+          </select>
+        </label>
+        <button type="submit">Create template</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Park a cluster (upload zip)</h2>
+      <form method="post" action="/cluster/upload" enctype="multipart/form-data">
+        <label>Park name <input name="park_name" placeholder="my-world-backup" required /></label>
+        <label>Zip file <input type="file" name="zipfile" accept=".zip" required /></label>
+        <button type="submit">Upload</button>
+      </form>
+      <p class="muted">Zip should contain the cluster folder's contents (cluster.ini, Master/, etc.) — single top-level folder is auto-flattened.</p>
+    </section>
+
+    <section>
+      <h2>Parked clusters ({{ parked|length }})</h2>
+      {% if parked %}
+      <table>
+        <thead><tr><th>Name</th><th>Size</th><th>Last modified (UTC)</th><th>Valid</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for p in parked %}
+          <tr>
+            <td><code>{{ p.name }}</code></td>
+            <td>{{ p.size_mb }} MB</td>
+            <td>{{ p.mtime }}</td>
+            <td>{{ '✓' if p.valid else '—' }}</td>
+            <td>
+              <form method="post" action="/cluster/activate" class="inline">
+                <input type="hidden" name="parked_name" value="{{ p.name }}" />
+                <button type="submit" {% if not p.valid %}disabled{% endif %}>Activate</button>
+              </form>
+              <form method="post" action="/cluster/delete" class="inline" onsubmit="return confirm('Delete parked {{ p.name }}?')">
+                <input type="hidden" name="parked_name" value="{{ p.name }}" />
+                <button type="submit" class="warn">Delete</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">No parked clusters.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>Admins</h2>
+      <p class="muted">One KU_ ID per line. Blank lines and lines not starting with KU_ are stripped on save.</p>
+      <form method="post" action="/admins">
+        <textarea name="adminlist" rows="6" {% if not cluster_ready %}disabled{% endif %}>{{ adminlist }}</textarea>
+        <button type="submit" {% if not cluster_ready %}disabled{% endif %}>Save adminlist.txt</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Mods</h2>
+      <label>dedicated_server_mods_setup.lua (workshop IDs to download)</label>
+      <form method="post" action="/mods">
+        <textarea name="mods_setup" rows="6">{{ mods_setup }}</textarea>
+        <label>Master/modoverrides.lua (per-cluster enable + config)</label>
+        <textarea name="modoverrides" rows="10" {% if not cluster_ready %}disabled{% endif %}>{{ modoverrides }}</textarea>
+        <button type="submit">Save mods config</button>
+      </form>
+      <p class="muted">Restart the server after editing mods; workshop downloads happen on boot.</p>
+    </section>
+
+    <section>
+      <h2>Bootstrap (regenerate for re-provisioning)</h2>
+      <p class="muted">Everything below includes secrets from the current .env — treat like a password.</p>
+      <p>
+        <a href="/bootstrap/env" class="button">Download .env</a>
+        <a href="/bootstrap/script" class="button">Download bootstrap.sh</a>
+      </p>
+      <p class="muted">.env keys currently stored: {{ env_keys|join(', ') or '(none)' }}</p>
+    </section>
+
+  </main>
+  <footer>
+    <p class="muted">
+      DST state: {{ dst.state }} ·
+      container: <code>{{ 'present' if dst.exists else 'absent' }}</code> ·
+      <a href="/status">json status</a>
+    </p>
+  </footer>
+</body>
+</html>
