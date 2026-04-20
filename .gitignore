@@ -1,3 +1,6 @@
 saves/
+.env
+.env.*
+!.env.example
 *.tmp
 .DS_Store

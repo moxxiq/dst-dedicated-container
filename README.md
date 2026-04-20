@@ -1,10 +1,12 @@
-# SteamCMD + Don't Starve Together server
+# Don't Starve Together dedicated server — container
 
-Container for running SteamCMD and (next step) the Don't Starve Together dedicated server.
+SteamCMD + the DST dedicated server (`app_id 343050`) in a single image, with:
+- `app_update` on every start (stays current with Klei patches)
+- Cloudflare R2 backup — inotify-triggered, 10 s debounced
+- Graceful `c_save()` + `c_shutdown()` on `podman stop`
+- Workshop mod auto-update via `dedicated_server_mods_setup.lua`
 
-- Built for deployment on **x86_64 Linux** (VPS or home box) — that's the real target.
-- On **macOS Apple Silicon** the files still build/mount/launch via Podman, but Rosetta on the current kernel crashes Steam binaries (documented below); so Mac is for container plumbing validation, not actual Steam operations.
-- Same Dockerfile, compose, and scripts work on both — only runtime behavior differs.
+**Target:** x86_64 Linux VPS (Vultr is the reference). macOS Apple Silicon builds/mounts fine but cannot actually run Steam binaries (Rosetta + kernel bug, see Troubleshooting). Mac is for plumbing validation only.
 
 ---
 
@@ -20,109 +22,84 @@ Container for running SteamCMD and (next step) the Don't Starve Together dedicat
 ```
 steamCMD/
 ├── Dockerfile
-├── docker-compose.yml          # one launch option
-├── run-steamcmd.sh             # compose-free launch option
-├── entrypoint.sh
-├── saves/                      # BIND-MOUNTED into container (edit freely)
-│   └── qkation-cooperative/    # DST cluster folder
+├── entrypoint.sh             # orchestrator: update → mods → restore → launch → backup → graceful stop
+├── run-dst.sh                # PRODUCTION launcher (detached, ports, restart policy, env file)
+├── run-steamcmd.sh           # DEV launcher (interactive smoke test / shell)
+├── docker-compose.yml        # DEV convenience only (smoke tests, interactive debug)
+├── .env.example              # copy to .env and fill in (CLUSTER_TOKEN, R2_*, etc.)
+├── saves/                    # bind-mounted at /home/ubuntu/.klei/DoNotStarveTogether
+│   └── qkation-cooperative/    # one subdir per cluster
 │       ├── cluster.ini
-│       ├── cluster_token.txt   # ← secret
+│       ├── cluster_token.txt   # secret — or set $CLUSTER_TOKEN in .env
+│       ├── adminlist.txt       # KU_... IDs, one per line (admin web panel will edit this)
 │       └── Master/
 │           ├── server.ini
 │           └── modoverrides.lua
 └── mods/
-    └── dedicated_server_mods_setup.lua   # list of Workshop mods to download
+    └── dedicated_server_mods_setup.lua    # ServerModSetup() list; entrypoint copies into DST install
 ```
 
-### The two persistent volumes (don't touch by hand)
-- `steamcmd-home` → Steam install + auth cache. Lets you skip bootstrap on restart.
-- `dst-server`    → the DST dedicated server install (~2 GB).
+### Two persistent named volumes (don't touch by hand)
+- `steamcmd-home` → Steam install + auth cache.
+- `dst-server`    → DST dedicated server install (~2 GB).
 
-### The one bind-mounted folder (edit freely)
-- `./saves/` → mounted at `/home/ubuntu/.klei` inside the container. This is where DST worlds, shard data, configs, and the cluster token live.
+### Two bind-mounted folders (edit freely on host)
+- `./saves/` → `/home/ubuntu/.klei/DoNotStarveTogether` — one subdir per cluster.
+- `./mods/`  → `/home/ubuntu/user-mods` — the entrypoint copies `dedicated_server_mods_setup.lua` into the DST install on each start.
 
 ---
 
 ## Launching
 
-Two equivalent entry points — pick one.
-
-### Option A — compose
+### 1. Build the image
 
 ```bash
-# Build + run (interactive steamcmd shell):
-podman compose run --rm steamcmd steamcmd
-
-# Anonymous one-off smoke test:
-podman compose run --rm steamcmd steamcmd +login anonymous +quit
-
-# Interactive bash inside container:
-podman compose run --rm steamcmd bash
-```
-
-### Option B — plain `podman run` via the script
-
-```bash
-# Default: smoke test
-./run-steamcmd.sh
-
-# Run arbitrary commands:
-./run-steamcmd.sh steamcmd +login anonymous +quit
-./run-steamcmd.sh bash
-
-# Point at a DIFFERENT host save folder:
-SAVES_DIR=/path/to/my/saves ./run-steamcmd.sh bash
-```
-
-### Option C — raw `podman build` + `podman run` (no compose, no script)
-
-```bash
-# Build + tag (same step):
 podman build --platform=linux/amd64 -t local/steamcmd:latest .
-
-# One-shot run (anonymous smoke test):
-mkdir -p saves mods
-podman run --rm -it --platform=linux/amd64 \
-  -v steamcmd-home:/home/ubuntu/.local/share/Steam \
-  -v dst-server:/home/ubuntu/dst \
-  -v "$(pwd)/saves:/home/ubuntu/.klei:U" \
-  -v "$(pwd)/mods:/home/ubuntu/dst-mods:U" \
-  local/steamcmd:latest \
-  steamcmd +login anonymous +quit
-
-# Interactive bash — same flags, just change the last argument:
-podman run --rm -it --platform=linux/amd64 \
-  -v steamcmd-home:/home/ubuntu/.local/share/Steam \
-  -v dst-server:/home/ubuntu/dst \
-  -v "$(pwd)/saves:/home/ubuntu/.klei:U" \
-  -v "$(pwd)/mods:/home/ubuntu/dst-mods:U" \
-  local/steamcmd:latest \
-  bash
-
-# Long-running named container you re-attach to:
-podman run -dit --name dst --platform=linux/amd64 \
-  -v steamcmd-home:/home/ubuntu/.local/share/Steam \
-  -v dst-server:/home/ubuntu/dst \
-  -v "$(pwd)/saves:/home/ubuntu/.klei:U" \
-  -v "$(pwd)/mods:/home/ubuntu/dst-mods:U" \
-  local/steamcmd:latest \
-  sleep infinity
-
-podman exec -it dst bash          # attach
-podman stop dst && podman rm dst  # cleanup
 ```
 
-**Flag notes:**
-- `--rm` auto-deletes the container on exit — drop it for long-running named containers.
-- `-it` is needed for steamcmd to print output (see earlier "non-TTY swallows output" lesson).
-- `--platform=linux/amd64` is a no-op on x86_64 Linux, an accurate declaration that this image won't work natively on ARM.
-- `-v name:path` = named volume; `-v "$(pwd)/dir:path:U"` = bind mount with chown to UID 1000 (Podman only).
+### 2. Configure secrets
 
-On the first launch of a fresh VPS, run `./run-steamcmd.sh steamcmd +login anonymous +quit` once to populate the cache volume. Subsequent launches skip the bootstrap (~3 s startup).
+```bash
+cp .env.example .env
+$EDITOR .env     # paste CLUSTER_TOKEN, R2_* keys; pick CLUSTER_NAME
+```
+
+At minimum: `CLUSTER_NAME` and either `CLUSTER_TOKEN` (in `.env`) or a pre-populated `saves/<cluster>/cluster_token.txt`. R2 vars are optional — leave blank to disable backup/restore.
+
+### 3. Run the server (production)
+
+```bash
+./run-dst.sh              # start DST (detached, ports open, restart policy)
+./run-dst.sh logs         # follow logs
+./run-dst.sh stop         # graceful stop: c_save → c_shutdown → final R2 push → exit
+./run-dst.sh restart      # stop + start
+```
+
+Under the hood: `podman run -d --name dst --restart unless-stopped -p 10999:10999/udp ... local/steamcmd:latest dst`.
+
+First launch downloads DST (~2 GB) into the `dst-server` volume — takes a few minutes. Subsequent launches just run `app_update` (~5 s when nothing's changed) and start immediately.
+
+### 4. Dev / debug (optional)
+
+`run-steamcmd.sh` and `docker-compose.yml` are dev conveniences — interactive shells, ad-hoc steamcmd, one-off smoke tests. They do **not** apply restart policy, ports, or the env file automatically.
+
+```bash
+./run-steamcmd.sh                                   # anonymous smoke test
+./run-steamcmd.sh bash                              # interactive shell
+./run-steamcmd.sh steamcmd +login anonymous +quit   # explicit steamcmd
+
+podman compose run --rm dst bash                    # compose equivalent of the shell
+```
+
+### Flag notes
+- `--rm` auto-deletes the container on exit (used by the dev scripts, not production).
+- `-it` is required for steamcmd to emit output on a TTY.
+- `--platform=linux/amd64` is a no-op on x86_64 Linux and an accurate arch declaration on ARM hosts.
+- `-v name:path` = named volume; `-v "$(pwd)/dir:path:U"` = bind mount with Podman UID-1000 chown.
 
 ### ARM Mac: plumbing-only
 
-On Apple Silicon, steamcmd **cannot** actually download Steam content through Podman — Podman's Fedora CoreOS kernel (6.13+) breaks both QEMU's and Rosetta 2's x86 futex translation in a way that segfaults the Steam client. Mac is useful for validating that the image builds, volumes mount, and bind mounts work; actual installs happen on the Linux VPS.
+On Apple Silicon, steamcmd **cannot** actually run through Podman — kernel 6.13+ breaks both QEMU's and Rosetta 2's x86 futex translation in a way that segfaults the Steam client. Mac validates that the image builds, volumes mount, and bind mounts work; the actual `app_update` and server launch happen on the Linux VPS.
 
 If you want Mac-native steamcmd, OrbStack works (different runtime, ships its own kernel). Not required.
 
@@ -130,22 +107,29 @@ If you want Mac-native steamcmd, OrbStack works (different runtime, ships its ow
 
 ## Saves — backing up and restoring ("forward and backward")
 
-Saves live in `./saves/` on the host. It's a normal folder — use any host tool:
+Three layers of save handling:
 
+1. **Host folder `./saves/`** — a normal directory; use any host tool (below).
+2. **Automatic R2 backups** — if `R2_*` env vars are set, the entrypoint watches for every DST save (autosave, `c_save()`, day change) via inotify, debounces 10 s, tars the cluster, and uploads to:
+   - `r2://<bucket>/clusters/<cluster>/latest.tar.gz` (overwritten each time)
+   - `r2://<bucket>/clusters/<cluster>/history/<ISO-timestamp>-<tag>.tar.gz` (kept)
+3. **Graceful-stop backup** — `./run-dst.sh stop` runs `c_save()` + `c_shutdown(true)` inside the server, waits for clean exit, then does a final R2 push tagged `shutdown`.
+
+**Fresh VPS, saves folder empty?** On launch, if R2 is configured and `./saves/<cluster>/` is empty, the entrypoint restores from `latest.tar.gz` automatically. No manual pull.
+
+Manual host-side shuffling still works:
 ```bash
-# BACKUP (forward to a friend, VPS, or cold storage):
+# BACKUP to a local tarball:
 tar czf dst-backup-$(date +%Y%m%d).tgz saves/
 
-# RESTORE (backward — drop in someone else's save, or a backup):
-rm -rf saves/qkation-cooperative            # remove current cluster folder
-tar xzf dst-backup-20260418.tgz             # extract into ./saves/
-# then start the server — it'll load the restored world
+# RESTORE from a tarball:
+rm -rf saves/qkation-cooperative
+tar xzf dst-backup-20260420.tgz
 
-# SWAP to a fresh cluster without losing the old one:
+# SWAP without losing the old cluster:
 mv saves/qkation-cooperative saves/qkation-cooperative.archived
-# create or drop in a new cluster folder
 
-# SYNC to a VPS:
+# SYNC to another VPS:
 rsync -av --delete saves/ user@vps:/home/user/steamCMD/saves/
 ```
 
@@ -187,13 +171,13 @@ tar xzf backup.tgz -C saves/
    ```bash
    sudo chown -R 1000:1000 saves/   # Linux or macOS Terminal — Finder can't do this
    ```
-   Then edit `docker-compose.yml` / `run-steamcmd.sh` to remove `:U` from the `saves` line.
+   Then edit `docker-compose.yml` / `run-dst.sh` / `run-steamcmd.sh` to remove `:U` from the `saves` line.
 2. Always drop files into `saves/` **through the container** (doesn't fight the chown):
    ```bash
    podman run --rm -i --platform=linux/amd64 \
-     -v "$(pwd)/saves:/home/ubuntu/.klei:U" \
+     -v "$(pwd)/saves:/home/ubuntu/.klei/DoNotStarveTogether:U" \
      local/steamcmd:latest \
-     bash -c 'cd /home/ubuntu/.klei && unzip -o /dev/stdin' < backup.zip
+     bash -c 'cd /home/ubuntu/.klei/DoNotStarveTogether && unzip -o /dev/stdin' < backup.zip
    ```
 
 On the Linux VPS this hurts less — a one-time `sudo chown -R 1000:1000 saves/` after any host-side extract is enough.
@@ -257,32 +241,43 @@ The token is a secret. Don't commit `saves/` to git (the included `.gitignore` a
 
 ---
 
-## VPS deployment (when ready)
+## VPS deployment (Vultr)
 
-This whole folder is portable. On a fresh Linux x86_64 VPS:
+Quick-start on a fresh x86_64 Vultr VPS (full automated bootstrap is Phase 5):
 
 ```bash
-# 1. Install podman (Ubuntu example):
-sudo apt update && sudo apt install -y podman
+# 1. Install podman, git:
+sudo apt update && sudo apt install -y podman git
 
-# 2. Copy this folder:
-rsync -av ./ user@vps:/home/user/steamCMD/
+# 2. Clone and configure:
+git clone <this repo> /home/dst/steamCMD
+cd /home/dst/steamCMD
+sudo chown -R 1000:1000 saves/ mods/   # UID 1000 is the container user
+cp .env.example .env
+$EDITOR .env                           # paste CLUSTER_TOKEN, R2_* secrets
 
-# 3. On the VPS:
-cd /home/user/steamCMD
-sudo chown -R 1000:1000 saves/      # UID 1000 is container user
-./run-steamcmd.sh                   # first launch, bootstraps cache
+# 3. Open Vultr Cloud Firewall (in Vultr dashboard, not ufw):
+#    Firewall → your group → Add rule:
+#      UDP   10999    from anywhere    DST game
+#      UDP   8766     from anywhere    Steam auth
+#      UDP   27016    from anywhere    Steam master
+#      TCP   22       from your IP     SSH
+#    (Phase 3 adds TCP 8080 for the admin panel; Phase 4 adds TCP 8090 for Beszel.)
 
-# 4. Open DST ports in firewall (for the eventual DST run):
-sudo ufw allow 10999/udp            # server
-sudo ufw allow 8766/udp             # steam auth
-sudo ufw allow 27016/udp            # steam master
+# 4. Build and launch:
+podman build --platform=linux/amd64 -t local/steamcmd:latest .
+./run-dst.sh
+./run-dst.sh logs    # watch world-gen / first app_update
 ```
 
 On the VPS no `--platform` emulation happens — everything runs at native speed.
 
+### Vultr Cloud Firewall — why not UFW
+
+Vultr's firewall runs at the cloud-network layer, before packets reach the instance. Stacking UFW on top creates two places to debug when something breaks. Pick one; for Vultr, pick theirs.
+
 ### ARM VPS (Graviton, Ampere, etc.)
-Works but emulated. Fine for 1-4 players, noticeably slower world-gen and mod loads. Prefer x86_64 for DST.
+Emulated only. Prefer x86_64 for DST.
 
 ---
 
