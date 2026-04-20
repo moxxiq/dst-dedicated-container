@@ -12,6 +12,8 @@ FastAPI + Jinja2 single-page dashboard for managing the sibling DST container.
 - Edit `adminlist.txt` (KU_ IDs only, non-KU_ lines stripped on save).
 - Edit `dedicated_server_mods_setup.lua` and `Master/modoverrides.lua`.
 - Download a freshly-baked `.env` or full `bootstrap.sh` for re-provisioning a new VPS in one paste.
+- Prominent red banner when Cloudflare R2 credentials aren't set — R2 is required, not optional, and the DST container refuses to launch without it.
+- Bootstrap download endpoints return 409 Conflict if R2 isn't configured (rather than generating a broken script).
 
 ## Auth
 
