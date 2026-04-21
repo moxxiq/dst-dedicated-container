@@ -95,7 +95,7 @@ First launch downloads DST (~2 GB) into the `dst-server` volume — takes a few 
 ./run-steamcmd.sh bash                              # interactive shell
 ./run-steamcmd.sh steamcmd +login anonymous +quit   # explicit steamcmd
 
-podman compose run --rm dst bash                    # compose equivalent of the shell
+podman-compose run --rm dst bash                    # compose equivalent of the shell
 ```
 
 ### Flag notes
