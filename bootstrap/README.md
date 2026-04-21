@@ -67,20 +67,25 @@ Three ways to run it — pick whichever fits your workflow:
 > equivalent pre-filled script from your running `.env`, so re-provisioning
 > a new VPS is a one-paste operation.
 
-### Option B — vars file (non-interactive SSH)
+### Option B — vars file (non-interactive SSH, fresh VPS)
+
+Works on a brand-new VPS with no repo checkout — both files come down via `curl`:
 
 ```bash
-# 1. Fill in the template
-cp bootstrap/bootstrap.vars.example bootstrap.vars
-$EDITOR bootstrap.vars           # fill in every value
+# 1. Download the script + vars template to an empty directory
+curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh    -o bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/bootstrap.vars.example -o bootstrap.vars
 
-# 2. Download and run — no prompts
-curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh -o bootstrap.sh
+# 2. Fill in every value
+$EDITOR bootstrap.vars           # or: nano bootstrap.vars
+
+# 3. Run — no prompts
 chmod +x bootstrap.sh
 sudo ./bootstrap.sh --vars bootstrap.vars
 ```
 
-`bootstrap.vars` is in `.gitignore` — safe to keep in the checkout.
+`bootstrap.vars` is in `.gitignore` (once the bootstrap clones the repo) —
+safe to keep alongside the checkout for re-runs.
 
 ### Option C — interactive SSH (original flow)
 
@@ -141,8 +146,33 @@ Running the script a second time on the same VPS:
 - Keeps the existing `dst` user and repo checkout (just `git pull`s).
 - Overwrites `.env` with the new prompt answers — so if you just want
   to rotate the admin password, rerunning is the fastest path.
-- `podman build` / `podman compose up -d` both detect no-op builds and
+- `podman build` / `podman-compose up -d` both detect no-op builds and
   skip restarts when nothing changed.
+
+### Partial re-runs (when the bootstrap half-succeeded)
+
+If the bootstrap failed mid-way (image build error, missing package, etc.)
+and you just want to retry specific steps without starting over, run them
+**as the `dst` user** — `podman` is rootless and state is per-user:
+
+```bash
+# Refresh the checkout
+sudo -u dst -H bash -c "cd ~/steamCMD && git pull"
+
+# Rebuild the DST image
+sudo -u dst -H bash -c "cd ~/steamCMD && podman build --platform=linux/amd64 -t local/steamcmd:latest ."
+
+# Restart DST
+sudo -u dst -H bash -c "cd ~/steamCMD && ./run-dst.sh restart"
+
+# Rebuild + (re)start the admin panel
+sudo -u dst -H bash -c "cd ~/steamCMD/admin && podman build --platform=linux/amd64 -t local/dst-admin:latest . && podman-compose up -d"
+```
+
+Running `podman build` or `podman-compose` as `root` directly will NOT
+help — rootless podman keeps all state (images, containers, volumes) under
+the `dst` user's XDG_RUNTIME_DIR. The safest way to recover from a broken
+state is simply to re-run the full bootstrap, which is idempotent.
 
 ## Troubleshooting
 
@@ -151,5 +181,6 @@ Running the script a second time on the same VPS:
 | `No controlling TTY` | You piped the script through `curl \| bash`. Don't — download first, then run `sudo ./bootstrap.sh`. |
 | Podman rootless complains about subuid/subgid | `sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 dst` then re-run. |
 | DST container logs show "Waiting for cluster files" | Expected — open the admin panel and provision the cluster. |
-| Admin panel returns 500 on every endpoint | `ADMIN_PASSWORD` ended up empty. Re-run bootstrap or edit `.env` by hand and `cd admin && podman compose restart`. |
+| Admin panel returns 500 on every endpoint | `ADMIN_PASSWORD` ended up empty. Re-run bootstrap or edit `.env` by hand and `sudo -u dst -H bash -c "cd ~/steamCMD/admin && podman-compose restart"`. |
+| `podman compose: command not found` | The bootstrap installs `podman-compose` (Python wrapper with a dash). If you see `podman compose` (space) instead, you're on an old copy of the bootstrap — re-pull with `curl`, or `apt install podman-compose`. |
 | Beszel hub shows agent as "Down" | You haven't pasted the hub's per-agent SSH key yet. See `monitoring/README.md` step 3. |
