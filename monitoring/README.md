@@ -14,7 +14,7 @@ agent needs to be deployed there — one hub can watch many hosts.
 
 ```bash
 cd monitoring
-podman compose up -d
+podman-compose up -d
 ```
 
 1. Open `http://<vps-ip>:8090` and create the first admin user.
@@ -27,7 +27,7 @@ podman compose up -d
 ```bash
 cp .env.example .env
 # paste the key into BESZEL_AGENT_KEY=...
-podman compose up -d     # recreates the agent with the new key
+podman-compose up -d     # recreates the agent with the new key
 ```
 
 The system turns green within ~30 seconds. DST's container appears in the
@@ -56,7 +56,7 @@ connection is local. Leave that port out of your firewall rules.
 
 ```bash
 cd monitoring
-podman compose down
+podman-compose down
 ```
 
 Data is kept in named podman volumes (`beszel_data`, `beszel_agent_data`).

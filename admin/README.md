@@ -26,7 +26,7 @@ HTTP Basic. Username defaults to `admin`, override with `ADMIN_USER` in `.env`.
 ```bash
 # From the repo root, after ../.env is populated:
 cd admin
-podman compose up -d
+podman-compose up -d
 # then open http://<vps-ip>:8080
 ```
 

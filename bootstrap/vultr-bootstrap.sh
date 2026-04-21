@@ -6,9 +6,12 @@
 #   chmod +x bootstrap.sh
 #   sudo ./bootstrap.sh
 #
-# NON-INTERACTIVE — fill a vars file and pass it:
-#   cp bootstrap/bootstrap.vars.example bootstrap.vars
-#   # edit bootstrap.vars
+# NON-INTERACTIVE — download script + vars template, fill in, run
+# (works on a FRESH VPS with no repo checkout yet):
+#   curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh    -o bootstrap.sh
+#   curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/bootstrap.vars.example -o bootstrap.vars
+#   # edit bootstrap.vars — fill in every value
+#   chmod +x bootstrap.sh
 #   sudo ./bootstrap.sh --vars bootstrap.vars
 #
 # NON-INTERACTIVE — pre-export vars, then run:
@@ -138,8 +141,14 @@ say "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-    podman git rsync ca-certificates curl uidmap slirp4netns fuse-overlayfs \
-    dbus-user-session systemd-container
+    podman podman-compose git rsync ca-certificates curl uidmap \
+    slirp4netns fuse-overlayfs dbus-user-session systemd-container
+
+# Sanity-check podman-compose is reachable — on Ubuntu 22.04 the `podman`
+# package has no compose subcommand at all, and on 24.04 the subcommand
+# only works if an external provider like podman-compose is installed.
+command -v podman-compose >/dev/null \
+    || die "podman-compose not found after apt install — try: pip3 install --break-system-packages podman-compose"
 
 # ---- 3. User + rootless runtime ---------------------------------------------
 say "Creating ${DST_USER} user"
@@ -196,12 +205,12 @@ say "Building admin panel image"
 as_dst bash -c "cd '$TARGET/admin' && podman build --platform=linux/amd64 -t local/dst-admin:latest ."
 
 say "Starting admin panel"
-as_dst bash -c "cd '$TARGET/admin' && podman compose up -d"
+as_dst bash -c "cd '$TARGET/admin' && podman-compose up -d"
 
 # ---- 9. Optional Beszel monitoring ------------------------------------------
 if [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]]; then
     say "Starting Beszel monitoring"
-    as_dst bash -c "cd '$TARGET/monitoring' && podman compose up -d"
+    as_dst bash -c "cd '$TARGET/monitoring' && podman-compose up -d"
 fi
 
 # ---- 10. Summary -------------------------------------------------------------

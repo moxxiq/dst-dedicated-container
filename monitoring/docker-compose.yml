@@ -1,16 +1,19 @@
 # Beszel self-hosted monitoring — separate compose stack.
-# Start with:  cd monitoring && podman compose up -d
-# Stop with:   cd monitoring && podman compose down
+# Start with:  cd monitoring && podman-compose up -d
+# Stop with:   cd monitoring && podman-compose down
+#
+# We use `podman-compose` (dash, Python wrapper) rather than `podman compose`
+# (space) for Ubuntu 22.04 compatibility.
 #
 # Exposes the hub UI on :8090. The agent listens on 45876 and reports
 # system + container metrics for the host this stack runs on.
 #
 # First-run setup:
-#   1. podman compose up -d
+#   1. podman-compose up -d
 #   2. Open http://<vps-ip>:8090 and create the admin user.
 #   3. "Add new system" → name it (e.g. "dst-vps"), host = `agent`, port = 45876.
 #   4. The hub shows an SSH public key. Copy it into BESZEL_AGENT_KEY in .env,
-#      then `podman compose up -d` again to let the agent trust the hub.
+#      then `podman-compose up -d` again to let the agent trust the hub.
 #
 # The agent uses the podman socket (compatible with the docker API) to pull
 # container stats. DST's container shows up automatically once running.

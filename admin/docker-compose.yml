@@ -1,6 +1,10 @@
 # Admin panel stack — separate from the DST container.
-# Start with:  cd admin && podman compose up -d
-# Stop with:   cd admin && podman compose down
+# Start with:  cd admin && podman-compose up -d
+# Stop with:   cd admin && podman-compose down
+#
+# We use `podman-compose` (dash, the Python wrapper) rather than
+# `podman compose` (space, a podman 4.x subcommand) for Ubuntu 22.04
+# compatibility and consistency across environments.
 #
 # The DST container is launched separately via ../run-dst.sh — this panel
 # controls it over the mounted podman socket.
@@ -17,9 +21,12 @@ services:
     restart: unless-stopped
     ports:
       - "8080:8080"
+    # Short-form env_file — podman-compose 1.0.6 (the apt version on Ubuntu
+    # 22.04 / 24.04) crashes with TypeError on the Compose-Spec long-form
+    # (`- path: ... required: true`). Keep short-form until we bump to a
+    # provider that handles it cleanly.
     env_file:
-      - path: ../.env
-        required: true
+      - ../.env
     environment:
       DST_CONTAINER: "${DST_CONTAINER:-dst}"
       CLUSTER_NAME: "${CLUSTER_NAME:-qkation-cooperative}"
