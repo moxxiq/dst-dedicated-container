@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# DST dedicated server — Vultr VPS one-shot bootstrap.
+# DST dedicated server - Vultr VPS one-shot bootstrap.
 #
-# INTERACTIVE (SSH — prompts for all values):
+# INTERACTIVE (SSH - prompts for all values):
 #   curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh -o bootstrap.sh
 #   chmod +x bootstrap.sh
 #   sudo ./bootstrap.sh
 #
-# NON-INTERACTIVE — download script + vars template, fill in, run
+# NON-INTERACTIVE - download script + vars template, fill in, run
 # (works on a FRESH VPS with no repo checkout yet):
 #   curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh    -o bootstrap.sh
 #   curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/bootstrap.vars.example -o bootstrap.vars
-#   # edit bootstrap.vars — fill in every value
+#   # edit bootstrap.vars - fill in every value
 #   chmod +x bootstrap.sh
 #   sudo ./bootstrap.sh --vars bootstrap.vars
 #
-# NON-INTERACTIVE — pre-export vars, then run:
+# NON-INTERACTIVE - pre-export vars, then run:
 #   export CLUSTER_TOKEN="..." ADMIN_PASSWORD="..." R2_ACCOUNT_ID="..." ...
 #   sudo ./bootstrap.sh
 #
-# NON-INTERACTIVE — Vultr Startup Script (zero SSH needed):
-#   See bootstrap/vultr-startup-script.sh — fill in vars at top, paste into
-#   Vultr dashboard → Startup Scripts → Add Script → attach to VPS on create.
+# NON-INTERACTIVE - Vultr Startup Script (zero SSH needed):
+#   See bootstrap/vultr-startup-script.sh - fill in vars at top, paste into
+#   Vultr dashboard -> Startup Scripts -> Add Script -> attach to VPS on create.
 #
 # After it finishes you'll have:
 #   - A `dst` Linux user owning ~/steamCMD
@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Source a vars file if given — runs before the interactive/non-interactive check.
+# Source a vars file if given - runs before the interactive/non-interactive check.
 if [[ -n "$VARS_FILE" ]]; then
     [[ -f "$VARS_FILE" ]] || die "--vars: file not found: $VARS_FILE"
     # shellcheck source=/dev/null
@@ -78,7 +78,7 @@ _required_vars_set() {
 }
 
 if _required_vars_set; then
-    say "Non-interactive mode — using pre-set variables"
+    say "Non-interactive mode - using pre-set variables"
 
     # Apply defaults for optional vars.
     CLUSTER_NAME="${CLUSTER_NAME:-$CLUSTER_NAME_DEFAULT}"
@@ -90,7 +90,7 @@ if _required_vars_set; then
     [[ ${#ADMIN_PASSWORD} -ge 8 ]] || die "ADMIN_PASSWORD must be at least 8 characters."
     [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "n" \
        || "$INSTALL_BESZEL" == "yes" || "$INSTALL_BESZEL" == "no" ]] \
-        || warn "INSTALL_BESZEL='${INSTALL_BESZEL}' unexpected — expected y/n; treating as n."
+        || warn "INSTALL_BESZEL='${INSTALL_BESZEL}' unexpected - expected y/n; treating as n."
 
     printf '  CLUSTER_NAME  : %s\n'  "$CLUSTER_NAME"
     printf '  ADMIN_USER    : %s\n'  "$ADMIN_USER"
@@ -102,13 +102,13 @@ else
     # ---- Interactive path ----------------------------------------------------
     say "Interactive setup"
     # Use /dev/tty so prompts work even when the script is piped.
-    exec 3</dev/tty 4>/dev/tty || die "No controlling TTY. SSH in interactively first, or pre-set variables — see bootstrap/bootstrap.vars.example or bootstrap/vultr-startup-script.sh."
+    exec 3</dev/tty 4>/dev/tty || die "No controlling TTY. SSH in interactively first, or pre-set variables - see bootstrap/bootstrap.vars.example or bootstrap/vultr-startup-script.sh."
 
     read -r -u3 -p "Cluster name [${CLUSTER_NAME_DEFAULT}]: " CLUSTER_NAME
     CLUSTER_NAME="${CLUSTER_NAME:-$CLUSTER_NAME_DEFAULT}"
 
     read -r -u3 -p "Klei cluster token (paste from accounts.klei.com): " CLUSTER_TOKEN
-    [[ -n "$CLUSTER_TOKEN" ]] || warn "Empty cluster token — DST will not start until you set it."
+    [[ -n "$CLUSTER_TOKEN" ]] || warn "Empty cluster token - DST will not start until you set it."
 
     read -r -u3 -p "Admin panel username [admin]: " ADMIN_USER
     ADMIN_USER="${ADMIN_USER:-admin}"
@@ -121,7 +121,7 @@ else
         break
     done
 
-    say "Cloudflare R2 backup (REQUIRED — DST refuses to launch without it)"
+    say "Cloudflare R2 backup (REQUIRED - DST refuses to launch without it)"
     cat >&2 <<'R2NOTE'
   Create a bucket + API token at https://dash.cloudflare.com/?to=/:account/r2
   The token needs Object Read & Write scope on your bucket.
@@ -144,11 +144,11 @@ apt-get install -y --no-install-recommends \
     podman podman-compose git rsync ca-certificates curl uidmap \
     slirp4netns fuse-overlayfs dbus-user-session systemd-container
 
-# Sanity-check podman-compose is reachable — on Ubuntu 22.04 the `podman`
+# Sanity-check podman-compose is reachable - on Ubuntu 22.04 the `podman`
 # package has no compose subcommand at all, and on 24.04 the subcommand
 # only works if an external provider like podman-compose is installed.
 command -v podman-compose >/dev/null \
-    || die "podman-compose not found after apt install — try: pip3 install --break-system-packages podman-compose"
+    || die "podman-compose not found after apt install - try: pip3 install --break-system-packages podman-compose"
 
 # ---- 3. User + rootless runtime ---------------------------------------------
 say "Creating ${DST_USER} user"
@@ -224,23 +224,23 @@ $( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "  Besze
 
   Next steps:
     1. Open Vultr Cloud Firewall and allow:
-         UDP  10999       from anywhere   (DST Master shard — overworld)
-         UDP  8766        from anywhere   (Steam auth — Master)
-         UDP  27016       from anywhere   (Steam master server — Master)
-         UDP  10998       from anywhere   (DST Caves shard — underground)
-         UDP  8768        from anywhere   (Steam auth — Caves)
-         UDP  27018       from anywhere   (Steam master server — Caves)
+         UDP  10999       from anywhere   (DST Master shard - overworld)
+         UDP  8766        from anywhere   (Steam auth - Master)
+         UDP  27016       from anywhere   (Steam master server - Master)
+         UDP  10998       from anywhere   (DST Caves shard - underground)
+         UDP  8768        from anywhere   (Steam auth - Caves)
+         UDP  27018       from anywhere   (Steam master server - Caves)
          TCP  22          from your IP    (SSH)
          TCP  8080        from your IP    (admin panel)$( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "
          TCP  8090        from your IP    (Beszel UI)" )
-       (Missing caves UDP rules silently break surface↔caves teleports.)
+       (Missing caves UDP rules silently break surface<->caves teleports.)
     2. Open http://${VPS_IP}:8080 and either:
          - upload an existing cluster zip, or
          - use the template wizard to create a new world.
-    3. DST is currently waiting for a cluster — it will pick up the files
+    3. DST is currently waiting for a cluster - it will pick up the files
        within 5 seconds of the admin panel writing them.
 
   To re-run this bootstrap on a new VPS, download the pre-filled startup
-  script from the admin panel ("Download bootstrap.sh") — it bakes in all
+  script from the admin panel ("Download bootstrap.sh") - it bakes in all
   secrets so the next paste needs zero extra typing.
 EOF

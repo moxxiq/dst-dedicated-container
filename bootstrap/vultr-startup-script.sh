@@ -1,45 +1,45 @@
 #!/usr/bin/env bash
-# ─────────────────────────────────────────────────────────────────────────────
-#  DST dedicated server — Vultr Startup Script
+# -----------------------------------------------------------------------------
+#  DST dedicated server - Vultr Startup Script
 #
 #  HOW TO USE:
 #    1. Fill in every value in the "FILL IN THESE VARS" section below.
-#    2. Vultr dashboard → Startup Scripts → Add Script.
-#       Paste this whole file → Save → attach the script to your VPS on create.
+#    2. Vultr dashboard -> Startup Scripts -> Add Script.
+#       Paste this whole file -> Save -> attach the script to your VPS on create.
 #       Runs automatically as root on first boot. No SSH session needed.
 #
-#       — OR — SSH in as root and paste the filled-in script straight into the
+#       - OR - SSH in as root and paste the filled-in script straight into the
 #       terminal for immediate execution.
 #
 #  SECURITY NOTE:
 #    This file contains secrets (token, password, R2 keys). Do NOT commit it
 #    to git. Vultr stores it in your account; rotate credentials afterward if
 #    that concerns you.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 
-# ── FILL IN THESE VARS ───────────────────────────────────────────────────────
+# -- FILL IN THESE VARS -------------------------------------------------------
 
 CLUSTER_NAME="qkation-cooperative"    # Shown in the DST server browser
-CLUSTER_TOKEN=""                       # https://accounts.klei.com/account/game/servers → Add New Server
+CLUSTER_TOKEN=""                       # https://accounts.klei.com/account/game/servers -> Add New Server
 ADMIN_USER="admin"                     # Admin panel username  (http://<vps-ip>:8080)
-ADMIN_PASSWORD=""                      # Admin panel password — min 8 characters
-R2_ACCOUNT_ID=""                       # Cloudflare → R2 → Account ID (top-right of overview)
+ADMIN_PASSWORD=""                      # Admin panel password - min 8 characters
+R2_ACCOUNT_ID=""                       # Cloudflare -> R2 -> Account ID (top-right of overview)
 R2_BUCKET=""                           # Your R2 bucket name
-R2_ACCESS_KEY_ID=""                    # R2 → Manage API tokens → Create token → Access Key ID
-R2_SECRET_ACCESS_KEY=""                # Same token dialog → Secret Access Key
+R2_ACCESS_KEY_ID=""                    # R2 -> Manage API tokens -> Create token -> Access Key ID
+R2_SECRET_ACCESS_KEY=""                # Same token dialog -> Secret Access Key
 INSTALL_BESZEL="n"                     # "y" to also install Beszel monitoring on :8090
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Everything below this line is boilerplate — do not edit.
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
+# Everything below this line is boilerplate - do not edit.
+# -----------------------------------------------------------------------------
 
 set -euo pipefail
 
-# Validate before downloading anything — catch empty vars immediately.
+# Validate before downloading anything - catch empty vars immediately.
 _require() {
     local var="$1"
     [[ -n "${!var:-}" ]] || {
-        printf '\033[1;31mERROR: %s is empty — fill it in above this line.\033[0m\n' "$var" >&2
+        printf '\033[1;31mERROR: %s is empty - fill it in above this line.\033[0m\n' "$var" >&2
         exit 1
     }
 }
