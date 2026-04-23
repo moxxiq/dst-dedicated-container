@@ -26,8 +26,10 @@ CLUSTER_NAME="qkation-cooperative"
 # Get it at: https://accounts.klei.com/account/game/servers → Add New Server
 CLUSTER_TOKEN=""
 
-# Admin panel credentials (web UI on :8080).
-ADMIN_USER="admin"
+# Admin panel password (web UI on :8080).
+# The web admin username is ALWAYS the dst Linux user (which the bootstrap
+# creates). This same password is also set on the dst Linux user, so you
+# have ONE credential for web admin + Linux ssh/sudo on this VPS.
 ADMIN_PASSWORD=""         # min 8 characters
 
 # Cloudflare R2 — REQUIRED. DST refuses to launch without all four values.

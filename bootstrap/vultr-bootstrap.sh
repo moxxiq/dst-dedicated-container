@@ -23,12 +23,15 @@
 #   Vultr dashboard -> Startup Scripts -> Add Script -> attach to VPS on create.
 #
 # After it finishes you'll have:
-#   - A `dst` Linux user owning ~/steamCMD
+#   - A `dst` Linux user owning ~/steamCMD, with its Linux password set to
+#     the admin panel password you chose (one credential for both).
 #   - The DST container running under rootless podman (restart=unless-stopped)
-#   - The FastAPI admin panel on :8080 (HTTP Basic)
-#   - Optionally the Beszel monitoring stack (:8090) if you opt in
+#   - The FastAPI admin panel on :8080 (HTTP Basic, user: `dst`)
+#   - UFW (host firewall) configured with rules for SSH, admin, and DST ports.
+#   - Optionally the Beszel monitoring stack (:8090) if you opt in.
 #
-# Re-running is idempotent: existing users/clones/containers are reused.
+# Re-running is idempotent: existing users/clones/containers are reused, the
+# dst Linux password is rotated to whatever ADMIN_PASSWORD you supply.
 
 set -euo pipefail
 
@@ -82,7 +85,6 @@ if _required_vars_set; then
 
     # Apply defaults for optional vars.
     CLUSTER_NAME="${CLUSTER_NAME:-$CLUSTER_NAME_DEFAULT}"
-    ADMIN_USER="${ADMIN_USER:-admin}"
     INSTALL_BESZEL="${INSTALL_BESZEL:-n}"
     INSTALL_BESZEL="${INSTALL_BESZEL,,}"
 
@@ -93,7 +95,6 @@ if _required_vars_set; then
         || warn "INSTALL_BESZEL='${INSTALL_BESZEL}' unexpected - expected y/n; treating as n."
 
     printf '  CLUSTER_NAME  : %s\n'  "$CLUSTER_NAME"
-    printf '  ADMIN_USER    : %s\n'  "$ADMIN_USER"
     printf '  R2_BUCKET     : %s\n'  "$R2_BUCKET"
     printf '  INSTALL_BESZEL: %s\n'  "$INSTALL_BESZEL"
     printf '  (secrets omitted from log)\n'
@@ -110,11 +111,14 @@ else
     read -r -u3 -p "Klei cluster token (paste from accounts.klei.com): " CLUSTER_TOKEN
     [[ -n "$CLUSTER_TOKEN" ]] || warn "Empty cluster token - DST will not start until you set it."
 
-    read -r -u3 -p "Admin panel username [admin]: " ADMIN_USER
-    ADMIN_USER="${ADMIN_USER:-admin}"
+    # Admin panel username is always the DST Linux user (default: "dst").
+    # Same value is used for both the web admin login and the Linux user
+    # password, so you have one credential to remember for this VPS.
+    echo "  Admin panel username will be: ${DST_USER}"
+    echo "  (same name as the Linux user that owns ~/steamCMD)"
 
     while :; do
-        read -r -u3 -s -p "Admin panel password (required, min 8 chars): " ADMIN_PASSWORD; echo
+        read -r -u3 -s -p "Password for ${DST_USER} (web admin + Linux user, min 8 chars): " ADMIN_PASSWORD; echo
         read -r -u3 -s -p "Repeat: " ADMIN_PASSWORD2; echo
         if [[ "$ADMIN_PASSWORD" != "$ADMIN_PASSWORD2" ]]; then warn "Mismatch, try again."; continue; fi
         if [[ ${#ADMIN_PASSWORD} -lt 8 ]];               then warn "Too short."; continue; fi
@@ -136,12 +140,15 @@ R2NOTE
     INSTALL_BESZEL="${INSTALL_BESZEL,,}"  # lowercase
 fi
 
+# Admin panel login is always the DST Linux user. One credential for both.
+ADMIN_USER="$DST_USER"
+
 # ---- 2. System packages ------------------------------------------------------
 say "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-    podman podman-compose git rsync ca-certificates curl uidmap \
+    podman podman-compose git rsync ca-certificates curl uidmap ufw \
     slirp4netns fuse-overlayfs dbus-user-session systemd-container
 
 # Sanity-check podman-compose is reachable - on Ubuntu 22.04 the `podman`
@@ -156,6 +163,10 @@ if ! id "$DST_USER" >/dev/null 2>&1; then
     useradd -m -s /bin/bash "$DST_USER"
 fi
 loginctl enable-linger "$DST_USER"
+
+# Unify credentials: ADMIN_PASSWORD is the web admin password AND the Linux
+# password for the dst user. Re-running rotates the password to match.
+echo "${DST_USER}:${ADMIN_PASSWORD}" | chpasswd
 
 as_dst() { sudo -u "$DST_USER" -H XDG_RUNTIME_DIR="/run/user/$(id -u "$DST_USER")" "$@"; }
 
@@ -213,7 +224,31 @@ if [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]]; then
     as_dst bash -c "cd '$TARGET/monitoring' && podman-compose up -d"
 fi
 
-# ---- 10. Summary -------------------------------------------------------------
+# ---- 10. Host firewall (UFW) ------------------------------------------------
+# Ubuntu Vultr images sometimes ship with UFW active (default deny incoming),
+# silently blocking ports we've just bound. Rather than tell the operator to
+# do this by hand after the fact, open the ports we need here and make sure
+# UFW is enabled. SSH goes first so `ufw enable` can't lock you out.
+say "Configuring host firewall (ufw)"
+ufw allow 22/tcp     comment 'SSH'                          >/dev/null
+ufw allow 8080/tcp   comment 'DST admin panel'              >/dev/null
+ufw allow 10999/udp  comment 'DST Master shard (overworld)' >/dev/null
+ufw allow 10998/udp  comment 'DST Caves shard (underground)' >/dev/null
+ufw allow 8766/udp   comment 'Steam auth (Master)'          >/dev/null
+ufw allow 8768/udp   comment 'Steam auth (Caves)'           >/dev/null
+ufw allow 27016/udp  comment 'Steam master server (Master)' >/dev/null
+ufw allow 27018/udp  comment 'Steam master server (Caves)'  >/dev/null
+if [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]]; then
+    ufw allow 8090/tcp comment 'Beszel UI' >/dev/null
+fi
+# --force skips the "this will disrupt existing SSH connections" prompt.
+if ! ufw status 2>/dev/null | grep -q 'Status: active'; then
+    ufw --force enable >/dev/null
+else
+    ufw reload >/dev/null
+fi
+
+# ---- 11. Summary -------------------------------------------------------------
 VPS_IP="$(hostname -I | awk '{print $1}')"
 say "Bootstrap complete"
 cat <<EOF
@@ -222,22 +257,29 @@ cat <<EOF
   Admin panel       : http://${VPS_IP}:8080     (user: ${ADMIN_USER})
 $( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "  Beszel monitoring : http://${VPS_IP}:8090" )
 
+  Credentials (unified):
+    Web admin login         : ${ADMIN_USER} / <your admin password>
+    Linux user on this VPS  : ${ADMIN_USER} / <same password>
+    SSH example             : ssh ${ADMIN_USER}@${VPS_IP}
+
+  Host firewall (UFW) already configured by this script:
+       TCP  22      SSH
+       TCP  8080    admin panel
+       UDP  10999   DST Master shard (overworld)
+       UDP  10998   DST Caves shard (underground)
+       UDP  8766    Steam auth (Master)
+       UDP  8768    Steam auth (Caves)
+       UDP  27016   Steam master server (Master)
+       UDP  27018   Steam master server (Caves)$( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "
+       TCP  8090    Beszel UI" )
+    (Caves UDP rules are required - missing them silently breaks
+     surface<->caves teleports.)
+
   Next steps:
-    1. Open Vultr Cloud Firewall and allow:
-         UDP  10999       from anywhere   (DST Master shard - overworld)
-         UDP  8766        from anywhere   (Steam auth - Master)
-         UDP  27016       from anywhere   (Steam master server - Master)
-         UDP  10998       from anywhere   (DST Caves shard - underground)
-         UDP  8768        from anywhere   (Steam auth - Caves)
-         UDP  27018       from anywhere   (Steam master server - Caves)
-         TCP  22          from your IP    (SSH)
-         TCP  8080        from your IP    (admin panel)$( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "
-         TCP  8090        from your IP    (Beszel UI)" )
-       (Missing caves UDP rules silently break surface<->caves teleports.)
-    2. Open http://${VPS_IP}:8080 and either:
+    1. Open http://${VPS_IP}:8080 (user: ${ADMIN_USER}) and either:
          - upload an existing cluster zip, or
          - use the template wizard to create a new world.
-    3. DST is currently waiting for a cluster - it will pick up the files
+    2. DST is currently waiting for a cluster - it will pick up the files
        within 5 seconds of the admin panel writing them.
 
   To re-run this bootstrap on a new VPS, download the pre-filled startup

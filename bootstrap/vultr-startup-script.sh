@@ -21,8 +21,8 @@
 
 CLUSTER_NAME="qkation-cooperative"    # Shown in the DST server browser
 CLUSTER_TOKEN=""                       # https://accounts.klei.com/account/game/servers -> Add New Server
-ADMIN_USER="admin"                     # Admin panel username  (http://<vps-ip>:8080)
-ADMIN_PASSWORD=""                      # Admin panel password - min 8 characters
+ADMIN_PASSWORD=""                      # Web admin + dst Linux user password (min 8 chars)
+                                       # Web admin login is always "dst"
 R2_ACCOUNT_ID=""                       # Cloudflare -> R2 -> Account ID (top-right of overview)
 R2_BUCKET=""                           # Your R2 bucket name
 R2_ACCESS_KEY_ID=""                    # R2 -> Manage API tokens -> Create token -> Access Key ID
@@ -57,7 +57,7 @@ _require R2_SECRET_ACCESS_KEY
 
 # Export so vultr-bootstrap.sh detects non-interactive mode automatically
 # (it checks whether all required vars are already set and skips prompts).
-export CLUSTER_NAME CLUSTER_TOKEN ADMIN_USER ADMIN_PASSWORD \
+export CLUSTER_NAME CLUSTER_TOKEN ADMIN_PASSWORD \
        R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY \
        INSTALL_BESZEL
 

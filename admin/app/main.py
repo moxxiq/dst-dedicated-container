@@ -66,7 +66,7 @@ ENV_FILE = DATA / ".env"
 
 DST_CONTAINER = os.environ.get("DST_CONTAINER", "dst")
 CLUSTER_NAME = os.environ.get("CLUSTER_NAME", "qkation-cooperative")
-ADMIN_USER = os.environ.get("ADMIN_USER", "admin")
+ADMIN_USER = os.environ.get("ADMIN_USER", "dst")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 # podman socket is mounted from the host so `podman` CLI in this container
@@ -786,7 +786,6 @@ BOOTSTRAP_SH = """\
 # ── VARS (pre-filled from your current .env) ─────────────────────────────────
 CLUSTER_NAME="{cluster_name}"
 CLUSTER_TOKEN="{cluster_token}"
-ADMIN_USER="{admin_user}"
 ADMIN_PASSWORD="{admin_password}"
 R2_ACCOUNT_ID="{r2_account_id}"
 R2_BUCKET="{r2_bucket}"
@@ -794,6 +793,9 @@ R2_ACCESS_KEY_ID="{r2_access_key_id}"
 R2_SECRET_ACCESS_KEY="{r2_secret_access_key}"
 INSTALL_BESZEL="n"
 # ─────────────────────────────────────────────────────────────────────────────
+# Web admin login is always the dst Linux user. ADMIN_PASSWORD is used for
+# BOTH the web admin and the dst Linux user password (so you can also SSH in
+# as dst with the same credential). See bootstrap/vultr-bootstrap.sh.
 
 set -euo pipefail
 
@@ -808,7 +810,7 @@ _require R2_BUCKET
 _require R2_ACCESS_KEY_ID
 _require R2_SECRET_ACCESS_KEY
 
-export CLUSTER_NAME CLUSTER_TOKEN ADMIN_USER ADMIN_PASSWORD \\
+export CLUSTER_NAME CLUSTER_TOKEN ADMIN_PASSWORD \\
        R2_ACCOUNT_ID R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY \\
        INSTALL_BESZEL
 
@@ -842,7 +844,6 @@ def bootstrap_script(_: str = Depends(require_auth)) -> Response:
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         cluster_name=env.get("CLUSTER_NAME", ""),
         cluster_token=env.get("CLUSTER_TOKEN", ""),
-        admin_user=env.get("ADMIN_USER", "admin"),
         admin_password=env.get("ADMIN_PASSWORD", ""),
         r2_account_id=env.get("R2_ACCOUNT_ID", ""),
         r2_bucket=env.get("R2_BUCKET", ""),

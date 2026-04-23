@@ -15,34 +15,11 @@ Beszel monitoring) in under ten minutes, most of it image build time.
      cluster token out of Vultr's logs.
    - Deploy and wait for the "Running" state.
 
-2. **Create the Cloud Firewall group** *(optional but recommended)*
-   - Networking → Firewall → Add Firewall Group
-   - Rules:
-
-     | Proto | Port  | Source       | Purpose                              |
-     |-------|-------|--------------|--------------------------------------|
-     | UDP   | 10999 | anywhere     | DST Master shard (overworld) game    |
-     | UDP   | 8766  | anywhere     | Steam auth (Master)                  |
-     | UDP   | 27016 | anywhere     | Steam master server (Master)         |
-     | UDP   | 10998 | anywhere     | DST Caves shard (underground) game   |
-     | UDP   | 8768  | anywhere     | Steam auth (Caves)                   |
-     | UDP   | 27018 | anywhere     | Steam master server (Caves)          |
-     | TCP   | 22    | your IP/CIDR | SSH                                  |
-     | TCP   | 8080  | your IP/CIDR | Admin panel                          |
-     | TCP   | 8090  | your IP/CIDR | Beszel UI (if installed)             |
-
-   - Both Master and Caves shards have to be reachable from the internet.
-     Clients connect to Master on 10999; Caves 10998 is what teleports
-     players between surface and caves underneath. Skip the caves rules
-     and caves transitions silently break.
-
-   - Linked Instances → add your VPS. Propagation is instant.
-
-3. **Grab your Klei cluster token**
+2. **Grab your Klei cluster token**
    - https://accounts.klei.com/account/game/servers → **Add New Server**
      → copy the token. You'll paste it into the script prompt.
 
-4. **Create a Cloudflare R2 bucket + API token** *(required)*
+3. **Create a Cloudflare R2 bucket + API token** *(required)*
    - R2 → Create bucket (any name, any region; "auto" works fine).
    - R2 → Manage API tokens → Create token with **Object Read & Write**.
    - You'll need: account ID, bucket name, access key ID, secret access
@@ -99,24 +76,62 @@ The script asks for:
 
 - **Cluster name** (defaults to `qkation-cooperative`)
 - **Klei cluster token**
-- **Admin panel username** (defaults to `admin`)
-- **Admin panel password** (typed twice, minimum 8 chars)
+- **Admin/Linux password** (typed twice, minimum 8 chars) — used for both
+  the web admin panel AND the `dst` Linux user. Username is always `dst`.
 - **Cloudflare R2** account ID / bucket / access key ID / secret
   (all four required — the script re-prompts on empty input)
 - **Beszel monitoring** y/N
 
 All three modes then:
 
-- Installs `podman`, `git`, rootless support packages
+- Installs `podman`, `podman-compose`, `git`, `ufw`, rootless support packages
 - Creates a `dst` Linux user (with lingering so rootless podman survives
-  SSH disconnects)
+  SSH disconnects) and sets its Linux password to your admin password
 - Clones this repo to `/home/dst/steamCMD`
 - Writes `.env` with the secrets (mode 0600, owned by `dst`)
 - Builds the DST image and starts the DST container
 - Builds the admin panel image and starts it on :8080
 - (Optionally) starts the Beszel hub+agent on :8090
+- Configures the host firewall (UFW) — opens the ports listed below and
+  enables UFW if it wasn't already active
 
-At the end it prints a summary with URLs and a firewall checklist.
+At the end it prints a summary with URLs and the UFW rules that were applied.
+
+## Unified credentials
+
+The script prompts for *one* password, which becomes:
+
+- The `dst` Linux user's password (so `ssh dst@<vps-ip>` works with it).
+- The admin panel's HTTP Basic password at `http://<vps-ip>:8080`.
+
+Both logins use `dst` as the username. Re-running the bootstrap with a
+different password rotates it on both sides at once.
+
+## Ports opened by the script (host UFW)
+
+The bootstrap now drives UFW directly — no separate Vultr Cloud Firewall
+step. These rules are applied for you:
+
+| Proto | Port  | Purpose                               |
+|-------|-------|---------------------------------------|
+| TCP   | 22    | SSH                                   |
+| TCP   | 8080  | Admin panel                           |
+| UDP   | 10999 | DST Master shard (overworld) game     |
+| UDP   | 10998 | DST Caves shard (underground) game    |
+| UDP   | 8766  | Steam auth (Master)                   |
+| UDP   | 8768  | Steam auth (Caves)                    |
+| UDP   | 27016 | Steam master server (Master)          |
+| UDP   | 27018 | Steam master server (Caves)           |
+| TCP   | 8090  | Beszel UI (only if installed)         |
+
+Both Master and Caves shards have to be reachable from the internet.
+Clients connect to Master on 10999; Caves 10998 is what teleports
+players between surface and caves underneath. Skip the caves rules and
+caves transitions silently break.
+
+If you *also* have a Vultr Cloud Firewall group attached to the VPS, it
+has to allow the same ports — otherwise Vultr drops the traffic before
+UFW ever sees it. If no Cloud Firewall is attached, UFW alone is enough.
 
 ## What the bootstrap does *not* do
 
@@ -124,11 +139,9 @@ At the end it prints a summary with URLs and a firewall checklist.
   you either upload a cluster zip or run the template wizard in the
   admin panel at `http://<vps-ip>:8080`. That's deliberate — no
   auto-generated world that you'd have to throw away.
-- **Does not touch the Vultr firewall.** Vultr's firewall lives at the
-  cloud-network layer and has to be managed in their dashboard. The
-  script prints the rules you need.
-- **Does not install UFW or iptables rules.** Stacking two firewalls
-  creates two places to debug. Use Vultr's only.
+- **Does not touch the Vultr Cloud Firewall.** If you've attached one,
+  mirror the port table above in the Vultr dashboard. UFW can't override
+  drops at the cloud-network layer.
 
 ## Re-running on a new VPS
 
@@ -146,6 +159,10 @@ Running the script a second time on the same VPS:
 - Keeps the existing `dst` user and repo checkout (just `git pull`s).
 - Overwrites `.env` with the new prompt answers — so if you just want
   to rotate the admin password, rerunning is the fastest path.
+- Rotates the `dst` Linux user's password to whatever you just typed
+  (the admin and Linux password stay in sync).
+- Re-applies UFW rules idempotently (`ufw allow` is a no-op if the rule
+  already exists).
 - `podman build` / `podman-compose up -d` both detect no-op builds and
   skip restarts when nothing changed.
 
