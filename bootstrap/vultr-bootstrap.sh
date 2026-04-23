@@ -166,7 +166,10 @@ loginctl enable-linger "$DST_USER"
 
 # Unify credentials: ADMIN_PASSWORD is the web admin password AND the Linux
 # password for the dst user. Re-running rotates the password to match.
-echo "${DST_USER}:${ADMIN_PASSWORD}" | chpasswd
+# Use usermod -p with a pre-hashed password to bypass PAM quality checks
+# (pam_pwquality rejects "simple" passwords via chpasswd on Ubuntu). The
+# operator is provisioning their own server and can choose their own password.
+usermod -p "$(openssl passwd -6 "${ADMIN_PASSWORD}")" "${DST_USER}"
 
 as_dst() { sudo -u "$DST_USER" -H XDG_RUNTIME_DIR="/run/user/$(id -u "$DST_USER")" "$@"; }
 
