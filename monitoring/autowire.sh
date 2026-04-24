@@ -135,6 +135,13 @@ fi
 # for the hub service's ${ADMIN_PASSWORD:?} substitution to resolve, even
 # though we only want to (re)start the agent. The `set -a; . ; set +a` above
 # already put it there, so this just works.
+#
+# XDG_RUNTIME_DIR: the compose mounts ${XDG_RUNTIME_DIR:-/run/user/1000}/podman/
+# podman.sock. `su -` and bare shells don't always populate that variable
+# (pam_systemd isn't in Ubuntu's default `su` PAM stack), so the compose
+# falls back to UID 1000 - wrong on hosts where the dst user got UID 1001.
+# Force-set it from the current effective UID before invoking compose.
+export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 log "restarting agent to pick up new key"
 ( cd "$MONITOR_DIR" && podman-compose up -d agent >/dev/null )
 

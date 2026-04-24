@@ -18,6 +18,20 @@ SteamCMD + the DST dedicated server (`app_id 343050`) in a single image, with:
 
 ---
 
+## Default logins (after `bootstrap/vultr-bootstrap.sh`)
+
+All three credentials are unified — same password across the board, set as `ADMIN_PASSWORD` in your `bootstrap.vars` (or in `/home/dst/steamCMD/.env` after install).
+
+| Where | URL | Username | Password |
+| --- | --- | --- | --- |
+| DST admin panel | `http://<vps>:8080` | `dst` | `$ADMIN_PASSWORD` |
+| Beszel monitoring | `http://<vps>:8090` | `admin@dst.local` | `$ADMIN_PASSWORD` |
+| SSH (sudoer) | `ssh dst@<vps>` | `dst` | `$ADMIN_PASSWORD` |
+
+Override the Beszel email via `BESZEL_USER_EMAIL` in `.env` before first hub boot (it's a one-shot — Beszel only seeds the admin user when the DB is empty).
+
+---
+
 ## Project layout
 
 ```
