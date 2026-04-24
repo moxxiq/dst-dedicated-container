@@ -159,6 +159,80 @@ def dst_log_tail(lines: int = 8) -> list[str]:
     return all_lines[-lines:]
 
 
+def dst_process_status() -> dict[str, Any]:
+    """Count live `dontstarve_dedicated_server` processes inside the container.
+
+    Container "running" from `podman inspect` only means the entrypoint shell
+    is alive - it can be wedged waiting for a cluster, mid-update, or even
+    the DST binary could have crashed while tini kept the shell up. pgrep is
+    ground truth.
+
+    Healthy two-shard cluster: count == 2 (Master + Caves binaries).
+    """
+    rc, out, _ = podman(
+        "exec", DST_CONTAINER, "pgrep", "-fc", "dontstarve_dedicated_server",
+        timeout=10,
+    )
+    if rc != 0:
+        # Container not running, or exec failed - can't tell.
+        return {"count": 0, "expected": 2, "healthy": False}
+    try:
+        count = int(out.strip())
+    except ValueError:
+        count = 0
+    return {"count": count, "expected": 2, "healthy": count == 2}
+
+
+# DST writes these strings into server_log.txt once the shard has finished
+# loading and once it has connected to its sibling shard, respectively.
+_SHARD_READY_MARKER = "Sim paused"
+_SHARD_LINKED_MARKER = "Shard link established"
+
+
+def parse_shard_log_state(log_path: Path) -> dict[str, Any]:
+    """Summarise the last ~32 KB of a shard's server_log.txt.
+
+    We only read the tail because these logs grow to megabytes on long
+    uptimes. 32 KB = a few minutes of idle-server output, which is plenty
+    to detect "this shard booted and is currently alive".
+    """
+    if not log_path.is_file():
+        return {"exists": False, "ready": False, "linked": False}
+    try:
+        size = log_path.stat().st_size
+        with log_path.open("rb") as f:
+            f.seek(max(0, size - 32 * 1024))
+            tail = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return {"exists": True, "ready": False, "linked": False}
+    return {
+        "exists": True,
+        "ready": _SHARD_READY_MARKER in tail,
+        "linked": _SHARD_LINKED_MARKER in tail,
+    }
+
+
+def uptime_human(started_at_iso: str | None) -> str:
+    """Render container uptime as 12s / 4m 2s / 2h 14m (no days - a DST
+    server up for days is already covered by the hour count).
+    """
+    if not started_at_iso:
+        return "-"
+    try:
+        # Podman returns e.g. "2026-04-24T00:17:31.123456789Z". Python's
+        # fromisoformat can't handle nanosecond precision pre-3.11, so trim.
+        base = started_at_iso.split(".")[0].rstrip("Z")
+        start = datetime.fromisoformat(base).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "-"
+    secs = int((datetime.now(timezone.utc) - start).total_seconds())
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m {secs % 60}s"
+    return f"{secs // 3600}h {(secs % 3600) // 60}m"
+
+
 # ---------------------------------------------------------------------------
 # Cluster helpers
 # ---------------------------------------------------------------------------
@@ -533,8 +607,27 @@ def api_status(_: str = Depends(require_auth)) -> Response:
     """Live-poll endpoint for the dashboard JavaScript. Returns JSON."""
     cd = cluster_dir()
     state = dst_status()
+    # Only bother with the exec / log-parse if the container exists; otherwise
+    # pgrep will just error out and we waste the round-trip.
+    if state.get("exists"):
+        procs = dst_process_status()
+        shard_log = {
+            "master": parse_shard_log_state(cd / "Master" / "server_log.txt"),
+            "caves":  parse_shard_log_state(cd / "Caves" / "server_log.txt"),
+        }
+        uptime = uptime_human(state.get("started_at")) if state.get("state") == "running" else "-"
+    else:
+        procs = {"count": 0, "expected": 2, "healthy": False}
+        shard_log = {
+            "master": {"exists": False, "ready": False, "linked": False},
+            "caves":  {"exists": False, "ready": False, "linked": False},
+        }
+        uptime = "-"
     data = {
         "dst": state,
+        "uptime": uptime,
+        "procs": procs,
+        "shard_log": shard_log,
         "cluster_ready": cluster_is_ready(),
         "cluster_exists": cd.exists(),
         "shards": shard_status(),

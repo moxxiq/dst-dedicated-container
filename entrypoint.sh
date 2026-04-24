@@ -181,13 +181,25 @@ do_wait_for_cluster() {
   log "  (two-shard cluster — both Master and Caves must be present)"
   log "============================"
 
-  local wait_ticks=0
+  # Event-driven wait: inotifywait unblocks the moment the admin panel writes
+  # any file under $KLEI_DIR/DoNotStarveTogether/, so DST starts within ~100ms
+  # of the files landing instead of up-to-5s-later under the old poll.
+  # -t 60 gives a fallback wake-up so we still emit a heartbeat even if the
+  # admin panel takes an hour to provision, and so we don't hang forever if
+  # the kernel drops events on a bind-mounted volume.
+  # inotify-tools is already installed (Dockerfile line 17) and used by the
+  # save-backup watcher — no new dependencies.
+  mkdir -p "$KLEI_DIR/DoNotStarveTogether"
+  local start_ts now last_beat
+  start_ts=$(date +%s); last_beat=$start_ts
   while ! cluster_ready; do
-    sleep 5
-    wait_ticks=$((wait_ticks + 1))
-    # Heartbeat log every 60 s.
-    if [ $((wait_ticks % 12)) -eq 0 ]; then
-      log "still waiting for cluster at $CLUSTER_DIR (elapsed $((wait_ticks * 5))s)"
+    inotifywait -qq -t 60 -e create,close_write,moved_to \
+      -r "$KLEI_DIR/DoNotStarveTogether" 2>/dev/null || true
+    cluster_ready && break
+    now=$(date +%s)
+    if (( now - last_beat >= 60 )); then
+      log "still waiting for cluster at $CLUSTER_DIR (elapsed $((now - start_ts))s)"
+      last_beat=$now
     fi
   done
   log "cluster detected — proceeding with launch"

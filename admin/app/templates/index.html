@@ -13,6 +13,8 @@
       <span id="pill-dst" class="pill {{ 'ok' if dst.state == 'running' else 'warn' }}">
         DST: {{ dst.state }}
       </span>
+      <span id="pill-procs" class="pill">Shards: -/2</span>
+      <span id="pill-uptime" class="pill">Uptime: -</span>
       <span id="pill-cluster" class="pill {{ 'ok' if cluster_ready else 'warn' }}">
         Cluster: {{ 'ready' if cluster_ready else ('empty' if not cluster_exists else 'incomplete') }}
       </span>
@@ -199,20 +201,46 @@
           el.textContent = text;
           el.className = 'pill' + (cls ? ' ' + cls : '');
         }
+        // Container state (just reflects podman inspect). Green only if the
+        // container says "running" AND both DST processes are live.
+        var dstOk = d.dst.state === 'running' && d.procs && d.procs.healthy;
         setPill('pill-dst',
-          'DST: ' + d.dst.state,
-          d.dst.state === 'running' ? 'ok' : 'warn');
+          'DST: ' + d.dst.state + (d.procs && d.procs.healthy ? '' : ' (degraded)'),
+          d.dst.state === 'running' ? (dstOk ? 'ok' : 'warn') : 'warn');
+
+        // Actual process count - 0/2, 1/2, 2/2.
+        var p = d.procs || {count: 0, expected: 2};
+        setPill('pill-procs',
+          'Shards: ' + p.count + '/' + p.expected,
+          p.count === p.expected ? 'ok' : (p.count === 0 ? 'warn' : 'warn'));
+
+        setPill('pill-uptime',
+          'Uptime: ' + (d.uptime || '-'),
+          d.uptime && d.uptime !== '-' ? 'ok' : '');
+
         var clsLabel = d.cluster_ready ? 'ready'
           : (d.cluster_exists ? 'incomplete' : 'empty');
         setPill('pill-cluster',
           'Cluster: ' + clsLabel,
           d.cluster_ready ? 'ok' : 'warn');
-        setPill('pill-master',
-          'Master: ' + (d.shards.master ? 'ok' : 'missing'),
-          d.shards.master ? 'ok' : 'warn');
-        setPill('pill-caves',
-          'Caves: ' + (d.shards.caves ? 'ok' : 'missing'),
-          d.shards.caves ? 'ok' : 'warn');
+
+        // Per-shard pill: combine "ini file exists" with live log-state.
+        // ready=true (Sim paused seen) -> green "live"
+        // linked=true (Shard link established) but no Sim paused yet -> "loading"
+        // ini exists but no log signals -> "starting"
+        // ini missing -> "missing"
+        function shardLabel(iniPresent, st) {
+          if (!iniPresent) return {text: 'missing', cls: 'warn'};
+          if (!st || !st.exists) return {text: 'starting', cls: 'warn'};
+          if (st.ready) return {text: 'live', cls: 'ok'};
+          if (st.linked) return {text: 'loading', cls: 'warn'};
+          return {text: 'booting', cls: 'warn'};
+        }
+        var m = shardLabel(d.shards.master, d.shard_log && d.shard_log.master);
+        setPill('pill-master', 'Master: ' + m.text, m.cls);
+        var c = shardLabel(d.shards.caves, d.shard_log && d.shard_log.caves);
+        setPill('pill-caves', 'Caves: ' + c.text, c.cls);
+
         setPill('pill-r2',
           'R2: ' + (d.r2_ready ? 'configured' : 'NOT SET'),
           d.r2_ready ? 'ok' : 'err');

@@ -164,6 +164,12 @@ if ! id "$DST_USER" >/dev/null 2>&1; then
 fi
 loginctl enable-linger "$DST_USER"
 
+# Put dst in the sudo group so the operator can `sudo <cmd>` from an SSH
+# session as dst (e.g. re-run this bootstrap, install packages, edit UFW).
+# They'll authenticate with ADMIN_PASSWORD (set below). Idempotent; adding
+# a user to a group they're already in is a no-op.
+usermod -aG sudo "$DST_USER"
+
 # Unify credentials: ADMIN_PASSWORD is the web admin password AND the Linux
 # password for the dst user. Re-running rotates the password to match.
 # Use usermod -p with a pre-hashed password to bypass PAM quality checks
