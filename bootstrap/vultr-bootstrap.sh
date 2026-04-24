@@ -286,14 +286,33 @@ say "Starting admin panel"
 # the shell that podman-compose runs in - so parse-time `${ADMIN_PASSWORD}`
 # substitutions in the yml need the vars in the caller's shell. Sourcing
 # ../.env into the subshell takes care of that for every compose invocation.
+#
+# `down` first: on re-runs, a stale container from a prior failed bootstrap
+# will name-collide with `podman run`, and podman-compose 1.0.6 falls back
+# to `podman start <old>` - which starts the OLD container with OLD bind
+# mounts (e.g. socket path from before podman-api-dst.service existed).
+# `down` removes those zombies; named volumes are preserved. No-op on
+# first install. 2>/dev/null because older compose files may not parse
+# cleanly if the .env is missing; we don't care about down errors.
+as_dst bash -c "set -a; . '$TARGET/.env'; set +a; cd '$TARGET/admin' && podman-compose down 2>/dev/null || true"
 as_dst bash -c "set -a; . '$TARGET/.env'; set +a; cd '$TARGET/admin' && podman-compose up -d"
 
 # ---- 9. Optional Beszel monitoring ------------------------------------------
 if [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]]; then
     say "Starting Beszel monitoring"
+    # Pre-create monitoring/.env so the agent service's `env_file: - .env`
+    # directive has a file for `podman run --env-file` to open on first run.
+    # autowire.sh populates it (BESZEL_AGENT_KEY=...) *after* compose-up, so
+    # without this touch the very first `up -d` fails to create the agent:
+    #   Error: parsing file "/home/dst/steamCMD/monitoring/.env":
+    #     open /home/dst/steamCMD/monitoring/.env: no such file or directory
+    as_dst bash -c "touch '$TARGET/monitoring/.env' && chmod 600 '$TARGET/monitoring/.env'"
+
     # First compose-up: hub seeds its admin user from ADMIN_PASSWORD on the
     # empty DB; agent boots without a key and waits. Source ../.env first so
     # ${ADMIN_PASSWORD:?} substitution resolves in podman-compose's own env.
+    # `down` first for the same zombie-container reason as the admin stack.
+    as_dst bash -c "set -a; . '$TARGET/.env'; set +a; cd '$TARGET/monitoring' && podman-compose down 2>/dev/null || true"
     as_dst bash -c "set -a; . '$TARGET/.env'; set +a; cd '$TARGET/monitoring' && podman-compose up -d"
 
     # autowire.sh fetches the hub's SSH pubkey, creates the system record via
