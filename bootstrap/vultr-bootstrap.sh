@@ -182,29 +182,58 @@ as_dst() { sudo -u "$DST_USER" -H XDG_RUNTIME_DIR="/run/user/${DST_UID}" "$@"; }
 
 # ---- 3b. Rootless podman API socket ----------------------------------------
 # The admin panel talks to podman through a bind-mounted socket at
-# /run/user/<uid>/podman/podman.sock. `loginctl enable-linger` (above) keeps
-# dst's systemd --user session alive across SSH logouts, but it does NOT
-# start the podman.socket unit. Without an explicit enable + start, the
-# socket file exists (systemd-activation placeholder) but nothing answers
-# API requests, and the admin panel logs:
-#   unable to connect to Podman socket: ... connection refused
+# /run/user/<uid>/podman/podman.sock. The usual way to expose that socket is
+# `systemctl --user enable --now podman.socket` - but that requires a live
+# user dbus, which `su -` / sudo don't always provide (pam_systemd isn't in
+# their PAM stack by default), and attempting it as root from this script
+# is fragile too.
 #
-# Kick the user systemd manager eagerly (enable-linger is lazy) so the dbus
-# socket appears, then enable+start podman.socket in dst's --user session.
-say "Starting rootless podman API socket for ${DST_USER}"
-systemctl start "user@${DST_UID}.service"
-# Wait up to 10s for the user dbus to come up; systemctl --user needs it.
-for _ in $(seq 1 10); do
-    [[ -S "/run/user/${DST_UID}/bus" ]] && break
+# Install a SYSTEM service that runs `podman system service` as the dst
+# user at the same socket path the compose files already mount. No user
+# dbus required, survives reboots cleanly, starts before the admin stack.
+say "Installing podman-api-dst.service"
+cat > /etc/systemd/system/podman-api-dst.service <<UNIT
+[Unit]
+Description=Podman REST API socket for user ${DST_USER} (bootstrap-managed)
+Documentation=man:podman-system-service(1)
+After=network-online.target user-runtime-dir@${DST_UID}.service
+Wants=network-online.target user-runtime-dir@${DST_UID}.service
+
+[Service]
+Type=exec
+User=${DST_USER}
+Group=${DST_USER}
+# Point rootless podman at the same XDG runtime dir its CLI invocations use
+# elsewhere (run-dst.sh, podman-compose), so they share one state tree.
+Environment=XDG_RUNTIME_DIR=/run/user/${DST_UID}
+# The runtime dir itself is created by systemd-logind (enable-linger); make
+# sure the podman subdir exists and is owned by dst before podman binds.
+ExecStartPre=/bin/mkdir -p /run/user/${DST_UID}/podman
+ExecStartPre=/bin/chown -R ${DST_USER}:${DST_USER} /run/user/${DST_UID}/podman
+# Previous podman-compose runs may have created a stub file at the socket
+# path (bind-mount source auto-creation). Remove it so bind() can take it.
+ExecStartPre=-/bin/rm -f /run/user/${DST_UID}/podman/podman.sock
+ExecStart=/usr/bin/podman system service --time=0 unix:///run/user/${DST_UID}/podman/podman.sock
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+systemctl daemon-reload
+systemctl enable --now podman-api-dst.service
+
+# Sanity-check the socket is actually listening before we hand off to the
+# admin panel. If this fails the admin panel will just log "connection
+# refused" on every /api/status poll, which is the bug we're here to fix.
+for _ in $(seq 1 15); do
+    [[ -S "/run/user/${DST_UID}/podman/podman.sock" ]] && break
     sleep 1
 done
-if ! sudo -u "$DST_USER" \
-        XDG_RUNTIME_DIR="/run/user/${DST_UID}" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${DST_UID}/bus" \
-        systemctl --user enable --now podman.socket >/dev/null 2>&1; then
-    warn "Could not enable podman.socket via 'systemctl --user'."
-    warn "The admin panel's /api/status will log 'connection refused' until"
-    warn "you run, as ${DST_USER}: systemctl --user enable --now podman.socket"
+if ! [[ -S "/run/user/${DST_UID}/podman/podman.sock" ]]; then
+    warn "podman-api-dst.service did not create its socket within 15s."
+    warn "Check: systemctl status podman-api-dst.service"
 fi
 
 # ---- 4. Clone the repo -------------------------------------------------------
