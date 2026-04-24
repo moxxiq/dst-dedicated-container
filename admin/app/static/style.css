@@ -159,6 +159,46 @@ code {
   border: 1px solid var(--border);
 }
 
+/* -- live log section -------------------------------------------------- */
+
+.log-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.75rem;
+  margin-top: 0.25rem;
+}
+
+@media (max-width: 600px) {
+  .log-grid { grid-template-columns: 1fr; }
+}
+
+.log-pane h3 {
+  margin: 0 0 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.log-pre {
+  margin: 0;
+  background: #0a0c10;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.5rem 0.7rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  color: #9fb0c8;
+  white-space: pre-wrap;
+  word-break: break-all;
+  min-height: 88px;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+/* -- footer ------------------------------------------------------------ */
+
 footer {
   padding: 1rem 1.5rem 2rem;
   color: var(--muted);

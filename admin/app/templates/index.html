@@ -10,17 +10,18 @@
   <header>
     <h1>DST admin <small>· {{ cluster_name }}</small></h1>
     <div class="status">
-      <span class="pill {{ 'ok' if dst.state == 'running' else 'warn' }}">
+      <span id="pill-dst" class="pill {{ 'ok' if dst.state == 'running' else 'warn' }}">
         DST: {{ dst.state }}
       </span>
-      <span class="pill {{ 'ok' if cluster_ready else 'warn' }}">
+      <span id="pill-cluster" class="pill {{ 'ok' if cluster_ready else 'warn' }}">
         Cluster: {{ 'ready' if cluster_ready else ('empty' if not cluster_exists else 'incomplete') }}
       </span>
-      <span class="pill {{ 'ok' if shards.master else 'warn' }}">Master: {{ 'ok' if shards.master else 'missing' }}</span>
-      <span class="pill {{ 'ok' if shards.caves else 'warn' }}">Caves: {{ 'ok' if shards.caves else 'missing' }}</span>
-      <span class="pill {{ 'ok' if r2_ready else 'err' }}">
+      <span id="pill-master" class="pill {{ 'ok' if shards.master else 'warn' }}">Master: {{ 'ok' if shards.master else 'missing' }}</span>
+      <span id="pill-caves" class="pill {{ 'ok' if shards.caves else 'warn' }}">Caves: {{ 'ok' if shards.caves else 'missing' }}</span>
+      <span id="pill-r2" class="pill {{ 'ok' if r2_ready else 'err' }}">
         R2: {{ 'configured' if r2_ready else 'NOT SET' }}
       </span>
+      <span id="status-ts" class="pill">live</span>
     </div>
   </header>
 
@@ -47,6 +48,24 @@
       <form method="post" action="/server/restart" class="inline"><button type="submit">Restart</button></form>
       <form method="post" action="/backup/trigger" class="inline"><button type="submit">Backup to R2 now</button></form>
       <p class="muted">Graceful stop: c_save() → c_shutdown(true) → final R2 push. Up to 90 s.</p>
+    </section>
+
+    <section>
+      <h2>Live status</h2>
+      <div class="log-grid">
+        <div class="log-pane">
+          <h3>Entrypoint log</h3>
+          <pre id="log-container" class="log-pre">(loading…)</pre>
+        </div>
+        <div class="log-pane">
+          <h3>Master shard log</h3>
+          <pre id="log-master" class="log-pre">(loading…)</pre>
+        </div>
+        <div class="log-pane">
+          <h3>Caves shard log</h3>
+          <pre id="log-caves" class="log-pre">(loading…)</pre>
+        </div>
+      </div>
     </section>
 
     {% if not cluster_ready %}
@@ -167,5 +186,61 @@
       <a href="/status">json status</a>
     </p>
   </footer>
+
+  <script>
+  (function poll() {
+    fetch('/api/status', {credentials: 'same-origin'})
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        // -- status pills --
+        function setPill(id, text, cls) {
+          var el = document.getElementById(id);
+          if (!el) return;
+          el.textContent = text;
+          el.className = 'pill' + (cls ? ' ' + cls : '');
+        }
+        setPill('pill-dst',
+          'DST: ' + d.dst.state,
+          d.dst.state === 'running' ? 'ok' : 'warn');
+        var clsLabel = d.cluster_ready ? 'ready'
+          : (d.cluster_exists ? 'incomplete' : 'empty');
+        setPill('pill-cluster',
+          'Cluster: ' + clsLabel,
+          d.cluster_ready ? 'ok' : 'warn');
+        setPill('pill-master',
+          'Master: ' + (d.shards.master ? 'ok' : 'missing'),
+          d.shards.master ? 'ok' : 'warn');
+        setPill('pill-caves',
+          'Caves: ' + (d.shards.caves ? 'ok' : 'missing'),
+          d.shards.caves ? 'ok' : 'warn');
+        setPill('pill-r2',
+          'R2: ' + (d.r2_ready ? 'configured' : 'NOT SET'),
+          d.r2_ready ? 'ok' : 'err');
+
+        // -- log panes --
+        function setLog(id, lines) {
+          var el = document.getElementById(id);
+          if (!el) return;
+          el.textContent = lines.length ? lines.join('\n') : '(no output yet)';
+          el.scrollTop = el.scrollHeight;
+        }
+        setLog('log-container', d.logs.container);
+        setLog('log-master',    d.logs.master);
+        setLog('log-caves',     d.logs.caves);
+
+        // -- timestamp --
+        var ts = document.getElementById('status-ts');
+        if (ts) {
+          var t = new Date(d.ts);
+          ts.textContent = t.toLocaleTimeString();
+        }
+      })
+      .catch(function() {
+        var ts = document.getElementById('status-ts');
+        if (ts) ts.textContent = 'offline';
+      })
+      .finally(function() { setTimeout(poll, 5000); });
+  })();
+  </script>
 </body>
 </html>

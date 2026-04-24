@@ -137,6 +137,28 @@ def dst_status() -> dict[str, Any]:
     }
 
 
+def read_log_tail(path: Path, lines: int = 8) -> list[str]:
+    """Last N non-empty lines from a text file (server_log.txt etc.)."""
+    if not path.is_file():
+        return []
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+        return [l for l in content.splitlines() if l.strip()][-lines:]
+    except OSError:
+        return []
+
+
+def dst_log_tail(lines: int = 8) -> list[str]:
+    """Last N lines from the DST container's combined stdout+stderr (entrypoint log)."""
+    # podman logs: container stdout -> process stdout, container stderr -> process stderr.
+    # entrypoint log() writes to stderr; DST binary output goes to stdout.
+    # Capture both, merge, return the tail.
+    rc, out, err = podman("logs", "--tail", str(lines * 2), DST_CONTAINER)
+    combined = "\n".join(filter(None, [out, err]))
+    all_lines = [l for l in combined.splitlines() if l.strip()]
+    return all_lines[-lines:]
+
+
 # ---------------------------------------------------------------------------
 # Cluster helpers
 # ---------------------------------------------------------------------------
@@ -504,6 +526,27 @@ def dashboard(request: Request, _: str = Depends(require_auth)) -> HTMLResponse:
             "env_keys": sorted(read_env_file().keys()),
         },
     )
+
+
+@app.get("/api/status")
+def api_status(_: str = Depends(require_auth)) -> Response:
+    """Live-poll endpoint for the dashboard JavaScript. Returns JSON."""
+    cd = cluster_dir()
+    state = dst_status()
+    data = {
+        "dst": state,
+        "cluster_ready": cluster_is_ready(),
+        "cluster_exists": cd.exists(),
+        "shards": shard_status(),
+        "r2_ready": r2_env_ready(read_env_file()),
+        "logs": {
+            "container": dst_log_tail(8),
+            "master": read_log_tail(cd / "Master" / "server_log.txt", 6),
+            "caves": read_log_tail(cd / "Caves" / "server_log.txt", 6),
+        },
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    return Response(content=json.dumps(data), media_type="application/json")
 
 
 @app.get("/status", response_class=PlainTextResponse)
