@@ -131,6 +131,10 @@ else
 fi
 
 # ---- 5. Restart agent so it re-reads BESZEL_AGENT_KEY -----------------------
+# podman-compose re-parses the yml; ADMIN_PASSWORD must be in the shell env
+# for the hub service's ${ADMIN_PASSWORD:?} substitution to resolve, even
+# though we only want to (re)start the agent. The `set -a; . ; set +a` above
+# already put it there, so this just works.
 log "restarting agent to pick up new key"
 ( cd "$MONITOR_DIR" && podman-compose up -d agent >/dev/null )
 

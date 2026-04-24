@@ -225,14 +225,19 @@ say "Building admin panel image"
 as_dst bash -c "cd '$TARGET/admin' && podman build --platform=linux/amd64 -t local/dst-admin:latest ."
 
 say "Starting admin panel"
-as_dst bash -c "cd '$TARGET/admin' && podman-compose up -d"
+# env_file: in a compose service injects vars into the CONTAINER, not into
+# the shell that podman-compose runs in - so parse-time `${ADMIN_PASSWORD}`
+# substitutions in the yml need the vars in the caller's shell. Sourcing
+# ../.env into the subshell takes care of that for every compose invocation.
+as_dst bash -c "set -a; . '$TARGET/.env'; set +a; cd '$TARGET/admin' && podman-compose up -d"
 
 # ---- 9. Optional Beszel monitoring ------------------------------------------
 if [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]]; then
     say "Starting Beszel monitoring"
     # First compose-up: hub seeds its admin user from ADMIN_PASSWORD on the
-    # empty DB; agent boots without a key and waits.
-    as_dst bash -c "cd '$TARGET/monitoring' && podman-compose up -d"
+    # empty DB; agent boots without a key and waits. Source ../.env first so
+    # ${ADMIN_PASSWORD:?} substitution resolves in podman-compose's own env.
+    as_dst bash -c "set -a; . '$TARGET/.env'; set +a; cd '$TARGET/monitoring' && podman-compose up -d"
 
     # autowire.sh fetches the hub's SSH pubkey, creates the system record via
     # the hub API, writes the key to monitoring/.env, and restarts the agent
