@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       locales \
       procps \
       curl \
+      libcurl3-gnutls \
       rclone \
       inotify-tools \
  && locale-gen en_US.UTF-8 \
