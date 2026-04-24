@@ -8,15 +8,21 @@
 # Exposes the hub UI on :8090. The agent listens on 45876 and reports
 # system + container metrics for the host this stack runs on.
 #
-# First-run setup:
-#   1. podman-compose up -d
-#   2. Open http://<vps-ip>:8090 and create the admin user.
-#   3. "Add new system" → name it (e.g. "dst-vps"), host = `agent`, port = 45876.
-#   4. The hub shows an SSH public key. Copy it into BESZEL_AGENT_KEY in .env,
-#      then `podman-compose up -d` again to let the agent trust the hub.
+# Fully-automated first-boot (via vultr-bootstrap.sh):
+#   1. podman-compose up -d    → hub seeds its admin user from ADMIN_PASSWORD
+#                                 (../.env). USER_EMAIL/USER_PASSWORD are a
+#                                 one-shot: hub ignores them once the DB has
+#                                 at least one user.
+#   2. ./autowire.sh           → fetches the hub's SSH public key, creates a
+#                                 system record for this host in the hub, and
+#                                 writes the key into monitoring/.env.
+#   3. podman-compose up -d    → agent picks up BESZEL_AGENT_KEY and the hub
+#                                 connects; full-system + container metrics
+#                                 appear in the UI within ~30 s.
 #
-# The agent uses the podman socket (compatible with the docker API) to pull
-# container stats. DST's container shows up automatically once running.
+# Log in at http://<vps-ip>:8090 with:
+#   email    = admin@dst.local  (override with BESZEL_USER_EMAIL in ../.env)
+#   password = ADMIN_PASSWORD   (same credential as the DST admin panel)
 
 services:
   beszel:
@@ -28,20 +34,33 @@ services:
     volumes:
       - beszel_data:/beszel_data
       - beszel_socket:/beszel_socket
-    # UI settings like HUB_URL can be set after first login.
+    env_file:
+      - ../.env
+    environment:
+      USER_EMAIL: "${BESZEL_USER_EMAIL:-admin@dst.local}"
+      USER_PASSWORD: "${ADMIN_PASSWORD:?ADMIN_PASSWORD must be set in ../.env}"
+      # CONTAINER_DETAILS defaults on — per-container CPU/mem graphs + log
+      # viewer for dst, dst-admin, beszel-agent.
 
   agent:
     image: docker.io/henrygd/beszel-agent:latest
     container_name: beszel-agent
     restart: unless-stopped
+    # host networking so /proc, /sys and "network interfaces" the agent reads
+    # match the VPS, not a bridge namespace. Also means LISTEN binds on the
+    # actual host port 45876.
     network_mode: host
+    # Reads BESZEL_AGENT_KEY from monitoring/.env (written by autowire.sh on
+    # first bootstrap). Empty on first boot is the secure default — agent
+    # refuses connections until the key is set.
+    env_file:
+      - .env
     environment:
       LISTEN: "45876"
-      # Populated from monitoring/.env after first hub login. Empty on first
-      # boot is fine — the agent will refuse connections until set, which is
-      # the secure default.
       KEY: "${BESZEL_AGENT_KEY:-}"
-      # Point at the podman socket exposed as docker-compatible API.
+      # Label in the hub's system list. Falls back to the container's
+      # /etc/hostname if unset — autowire.sh sets it to the VPS hostname.
+      SYSTEM_NAME: "${BESZEL_SYSTEM_NAME:-}"
       DOCKER_HOST: "unix:///run/podman/podman.sock"
     volumes:
       - beszel_agent_data:/var/lib/beszel-agent

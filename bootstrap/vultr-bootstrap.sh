@@ -148,7 +148,7 @@ say "Installing system packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
-    podman podman-compose git rsync ca-certificates curl uidmap ufw \
+    podman podman-compose git rsync ca-certificates curl jq uidmap ufw \
     slirp4netns fuse-overlayfs dbus-user-session systemd-container
 
 # Sanity-check podman-compose is reachable - on Ubuntu 22.04 the `podman`
@@ -230,7 +230,20 @@ as_dst bash -c "cd '$TARGET/admin' && podman-compose up -d"
 # ---- 9. Optional Beszel monitoring ------------------------------------------
 if [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]]; then
     say "Starting Beszel monitoring"
+    # First compose-up: hub seeds its admin user from ADMIN_PASSWORD on the
+    # empty DB; agent boots without a key and waits.
     as_dst bash -c "cd '$TARGET/monitoring' && podman-compose up -d"
+
+    # autowire.sh fetches the hub's SSH pubkey, creates the system record via
+    # the hub API, writes the key to monitoring/.env, and restarts the agent
+    # so it picks the key up. After this the hub shows this host green in the
+    # "Systems" list with full CPU/RAM/disk/net metrics + container stats for
+    # dst / dst-admin / beszel-agent. Idempotent; fine to re-run.
+    if ! as_dst bash -c "cd '$TARGET/monitoring' && ./autowire.sh"; then
+        warn "Beszel autowire failed - log in at http://<vps-ip>:8090 and add the system manually."
+        warn "  email    = admin@dst.local"
+        warn "  password = <your ADMIN_PASSWORD>"
+    fi
 fi
 
 # ---- 10. Host firewall (UFW) ------------------------------------------------
@@ -268,8 +281,9 @@ $( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "  Besze
 
   Credentials (unified):
     Web admin login         : ${ADMIN_USER} / <your admin password>
-    Linux user on this VPS  : ${ADMIN_USER} / <same password>
-    SSH example             : ssh ${ADMIN_USER}@${VPS_IP}
+    Linux user on this VPS  : ${ADMIN_USER} / <same password, sudoer>
+    SSH example             : ssh ${ADMIN_USER}@${VPS_IP}$( [[ "$INSTALL_BESZEL" == "y" || "$INSTALL_BESZEL" == "yes" ]] && echo "
+    Beszel login            : admin@dst.local / <same password>" )
 
   Host firewall (UFW) already configured by this script:
        TCP  22      SSH
