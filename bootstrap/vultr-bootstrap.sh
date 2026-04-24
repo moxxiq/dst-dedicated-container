@@ -210,9 +210,12 @@ Environment=XDG_RUNTIME_DIR=/run/user/${DST_UID}
 # sure the podman subdir exists and is owned by dst before podman binds.
 ExecStartPre=/bin/mkdir -p /run/user/${DST_UID}/podman
 ExecStartPre=/bin/chown -R ${DST_USER}:${DST_USER} /run/user/${DST_UID}/podman
-# Previous podman-compose runs may have created a stub file at the socket
-# path (bind-mount source auto-creation). Remove it so bind() can take it.
-ExecStartPre=-/bin/rm -f /run/user/${DST_UID}/podman/podman.sock
+# Previous podman-compose runs may have auto-created this path as either a
+# stub file OR an empty directory (podman auto-creates the bind-mount source
+# as a directory when it doesn't exist). Either way, bind() can't use it.
+# -rf handles both cases; the leading `-` in ExecStartPre means don't fail
+# the unit if there's genuinely nothing to remove.
+ExecStartPre=-/bin/rm -rf /run/user/${DST_UID}/podman/podman.sock
 ExecStart=/usr/bin/podman system service --time=0 unix:///run/user/${DST_UID}/podman/podman.sock
 Restart=on-failure
 RestartSec=3
