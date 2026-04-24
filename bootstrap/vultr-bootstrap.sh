@@ -177,7 +177,35 @@ usermod -aG sudo "$DST_USER"
 # operator is provisioning their own server and can choose their own password.
 usermod -p "$(openssl passwd -6 "${ADMIN_PASSWORD}")" "${DST_USER}"
 
-as_dst() { sudo -u "$DST_USER" -H XDG_RUNTIME_DIR="/run/user/$(id -u "$DST_USER")" "$@"; }
+DST_UID="$(id -u "$DST_USER")"
+as_dst() { sudo -u "$DST_USER" -H XDG_RUNTIME_DIR="/run/user/${DST_UID}" "$@"; }
+
+# ---- 3b. Rootless podman API socket ----------------------------------------
+# The admin panel talks to podman through a bind-mounted socket at
+# /run/user/<uid>/podman/podman.sock. `loginctl enable-linger` (above) keeps
+# dst's systemd --user session alive across SSH logouts, but it does NOT
+# start the podman.socket unit. Without an explicit enable + start, the
+# socket file exists (systemd-activation placeholder) but nothing answers
+# API requests, and the admin panel logs:
+#   unable to connect to Podman socket: ... connection refused
+#
+# Kick the user systemd manager eagerly (enable-linger is lazy) so the dbus
+# socket appears, then enable+start podman.socket in dst's --user session.
+say "Starting rootless podman API socket for ${DST_USER}"
+systemctl start "user@${DST_UID}.service"
+# Wait up to 10s for the user dbus to come up; systemctl --user needs it.
+for _ in $(seq 1 10); do
+    [[ -S "/run/user/${DST_UID}/bus" ]] && break
+    sleep 1
+done
+if ! sudo -u "$DST_USER" \
+        XDG_RUNTIME_DIR="/run/user/${DST_UID}" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${DST_UID}/bus" \
+        systemctl --user enable --now podman.socket >/dev/null 2>&1; then
+    warn "Could not enable podman.socket via 'systemctl --user'."
+    warn "The admin panel's /api/status will log 'connection refused' until"
+    warn "you run, as ${DST_USER}: systemctl --user enable --now podman.socket"
+fi
 
 # ---- 4. Clone the repo -------------------------------------------------------
 say "Fetching repo at ${TARGET}"
