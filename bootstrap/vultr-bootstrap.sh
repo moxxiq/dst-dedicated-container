@@ -212,9 +212,9 @@ ExecStartPre=/bin/mkdir -p /run/user/${DST_UID}/podman
 ExecStartPre=/bin/chown -R ${DST_USER}:${DST_USER} /run/user/${DST_UID}/podman
 # Previous podman-compose runs may have auto-created this path as either a
 # stub file OR an empty directory (podman auto-creates the bind-mount source
-# as a directory when it doesn't exist). Either way, bind() can't use it.
-# -rf handles both cases; the leading `-` in ExecStartPre means don't fail
-# the unit if there's genuinely nothing to remove.
+# as a directory when it doesn't exist). Either way, bind() cant use it.
+# -rf handles both cases; the leading dash on ExecStartPre= makes systemd
+# tolerate a non-zero exit (no-op when theres genuinely nothing to remove).
 ExecStartPre=-/bin/rm -rf /run/user/${DST_UID}/podman/podman.sock
 ExecStart=/usr/bin/podman system service --time=0 unix:///run/user/${DST_UID}/podman/podman.sock
 Restart=on-failure
