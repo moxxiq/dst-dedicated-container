@@ -74,7 +74,7 @@ Three separate named volumes (one bind mount optional):
 ## Launch mechanism: compose vs raw `podman run`
 
 **Compose is optional.** Two equivalent entry points:
-- [docker-compose.yml](docker-compose.yml) — convenient defaults, one command: `podman compose up`
+- [docker-compose.yml](docker-compose.yml) — convenient defaults, one command: `podman-compose up`
 - [run-steamcmd.sh](run-steamcmd.sh) — compose-free `podman run` one-liner, takes `SAVES_DIR` env override
 
 Either works. User preference (2026-04-18): keep a single-file launch path as a goal but compose is fine for now.
@@ -84,7 +84,7 @@ Either works. User preference (2026-04-18): keep a single-file launch path as a 
 ## Mac/Podman specifics
 
 - Podman on macOS runs a Linux VM (`podman machine`). First-time setup: `podman machine init` + `podman machine start`.
-- `podman compose` works but prefers `docker-compose` v2 syntax.
+- `podman-compose` (Python wrapper, from apt) is what the bootstrap uses; `podman compose` (4.x subcommand) also works if installed but prefers `docker-compose` v2 syntax.
 - On Apple Silicon, QEMU x86_64 emulation is automatic; no manual qemu setup.
 - Performance: DST server idle is fine under emulation; world generation and mod loads are noticeably slower but functional for testing.
 

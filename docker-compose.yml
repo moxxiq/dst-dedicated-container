@@ -17,7 +17,7 @@ services:
     image: local/steamcmd:latest
     platform: linux/amd64
     container_name: dst
-    # stdin/tty on so the DST console is usable when `podman compose run` interactively.
+    # stdin/tty on so the DST console is usable when `podman-compose run` interactively.
     stdin_open: true
     tty: true
     # DST's UDP ports — mirror run-dst.sh. Two shards → two sets of ports.
@@ -43,8 +43,8 @@ services:
       - ./mods:/home/ubuntu/user-mods:U                    # ServerModSetup manifest
     # Default command runs the full DST lifecycle via entrypoint.
     # Overrides:
-    #   podman compose run --rm dst bash                     # shell
-    #   podman compose run --rm dst steamcmd +login anonymous +quit
+    #   podman-compose run --rm dst bash                     # shell
+    #   podman-compose run --rm dst steamcmd +login anonymous +quit
 
 volumes:
   steamcmd-home:
