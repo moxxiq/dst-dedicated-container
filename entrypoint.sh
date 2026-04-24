@@ -308,10 +308,16 @@ launch_dst() {
   # FIFO per shard so we can route c_save/c_shutdown to each independently.
   # Each write end is held open in this shell (fds 3 and 4) — without a held
   # writer, the server's read end hits EOF immediately on first line.
+  #
+  # NOTE: open in read/write mode (`<>`) rather than write-only (`>`). On Linux
+  # `open(fifo, O_WRONLY)` blocks until a reader exists, but we haven't launched
+  # the DST binary (the reader) yet — that's a self-deadlock. `open(fifo, O_RDWR)`
+  # does not block and still lets us write; bash's `echo 'c_save()' >&3` works
+  # the same way either way because the fd is still writable.
   rm -f "$MASTER_FIFO" "$CAVES_FIFO"
   mkfifo "$MASTER_FIFO" "$CAVES_FIFO"
-  exec 3> "$MASTER_FIFO"
-  exec 4> "$CAVES_FIFO"
+  exec 3<> "$MASTER_FIFO"
+  exec 4<> "$CAVES_FIFO"
 
   start_inotify_watcher
   trap graceful_stop TERM INT
