@@ -49,11 +49,20 @@ case "${1:-start}" in
     # Remove any prior container with this name.
     podman rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
+    # --userns=keep-id:uid=1000,gid=1000 maps the host invoker (rootless dst,
+    # UID 1001) to the container's ubuntu user (UID 1000). The admin panel
+    # container also runs as host UID 1001 (rootless root maps there), so
+    # both containers see bind-mounted files as the *same* UID and the
+    # parked-cluster activate dance no longer creates files DST can't write.
+    # Without this the default subuid mapping puts container ubuntu at host
+    # UID 166535, while admin writes as host UID 1001 - permission mismatch
+    # on every file admin produces inside saves/.
     exec podman run -d \
       --name "$CONTAINER" \
       --platform=linux/amd64 \
       --restart unless-stopped \
       --stop-timeout "$STOP_TIMEOUT" \
+      --userns=keep-id:uid=1000,gid=1000 \
       -p 10999:10999/udp \
       -p 10998:10998/udp \
       -p 8766:8766/udp \
@@ -61,10 +70,10 @@ case "${1:-start}" in
       -p 27016:27016/udp \
       -p 27018:27018/udp \
       "${ENV_ARGS[@]}" \
-      -v steamcmd-home:/home/ubuntu/.local/share/Steam \
-      -v dst-server:/home/ubuntu/dst \
-      -v "$SAVES_DIR":/home/ubuntu/.klei/DoNotStarveTogether:U \
-      -v "$MODS_DIR":/home/ubuntu/user-mods:U \
+      -v steamcmd-home:/home/ubuntu/.local/share/Steam:U \
+      -v dst-server:/home/ubuntu/dst:U \
+      -v "$SAVES_DIR":/home/ubuntu/.klei/DoNotStarveTogether \
+      -v "$MODS_DIR":/home/ubuntu/user-mods \
       "$IMAGE" dst
     ;;
   *)
