@@ -149,7 +149,7 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     podman podman-compose git rsync ca-certificates curl jq uidmap ufw \
-    slirp4netns fuse-overlayfs dbus-user-session systemd-container
+    slirp4netns passt fuse-overlayfs dbus-user-session systemd-container
 
 # Sanity-check podman-compose is reachable - on Ubuntu 22.04 the `podman`
 # package has no compose subcommand at all, and on 24.04 the subcommand
