@@ -89,6 +89,12 @@ r2_rclone_env() {
   export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
   export RCLONE_CONFIG_R2_ENDPOINT="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
   export RCLONE_CONFIG_R2_REGION=auto
+  # rclone probes the bucket on first use (HEAD/PUT at the bucket root) to
+  # check existence / auto-create. R2 API tokens with Object R/W scope
+  # don't have bucket-level CreateBucket perms, so the probe 403s with a
+  # bare <Code>AccessDenied</Code> body and the actual upload never runs.
+  # Skip the probe — we know the bucket exists, the user created it.
+  export RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true
 }
 
 do_app_update() {
