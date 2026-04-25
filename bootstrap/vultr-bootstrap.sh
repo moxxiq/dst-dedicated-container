@@ -264,6 +264,11 @@ AUTO_UPDATE=1
 
 ADMIN_USER=${ADMIN_USER}
 ADMIN_PASSWORD=${ADMIN_PASSWORD}
+
+# podman-compose 1.0.6 does not expand \${VAR:-default} when VAR is absent -
+# it passes the literal expression into the container env.  Set explicit values
+# here so every compose \${VAR} substitution resolves without the :- fallback.
+DST_CONTAINER=dst
 EOF
 chown "$DST_USER:$DST_USER" "$TARGET/.env"
 chmod 0600 "$TARGET/.env"
