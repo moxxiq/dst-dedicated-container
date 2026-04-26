@@ -52,41 +52,14 @@ for i in $(seq 1 60); do
     (( i == 60 )) && die "hub not responding after 60s - is 'beszel' container up?"
 done
 
-# ---- 2. Fetch hub public key ------------------------------------------------
-# Newer Beszel versions expose an unauthenticated /api/beszel/getkey endpoint
-# that returns {"key":"ssh-ed25519 AAAA..."}. Older builds don't - fall back
-# to reading the file directly out of the hub container's data volume.
-PUBKEY=""
-if body=$(curl -fsS "$HUB_URL/api/beszel/getkey" 2>/dev/null); then
-    PUBKEY=$(echo "$body" | jq -r '.key // empty' 2>/dev/null || true)
-fi
-if [[ -z "$PUBKEY" ]]; then
-    # Private key lives at /beszel_data/id_ed25519; pub is sibling.
-    PUBKEY=$(podman exec beszel cat /beszel_data/id_ed25519.pub 2>/dev/null \
-           || podman exec beszel cat /beszel_data/pb_data/id_ed25519.pub 2>/dev/null \
-           || true)
-fi
-[[ -n "$PUBKEY" ]] || die "could not retrieve hub public key (tried API + exec)"
-log "hub public key retrieved"
-
-# ---- 3. Persist key to monitoring/.env --------------------------------------
-touch "$LOCAL_ENV"
-chmod 600 "$LOCAL_ENV"
-if grep -q '^BESZEL_AGENT_KEY=' "$LOCAL_ENV"; then
-    # Escape forward slashes for sed. The SSH key format doesn't contain "|".
-    sed -i "s|^BESZEL_AGENT_KEY=.*|BESZEL_AGENT_KEY=\"$PUBKEY\"|" "$LOCAL_ENV"
-else
-    printf 'BESZEL_AGENT_KEY="%s"\n' "$PUBKEY" >> "$LOCAL_ENV"
-fi
-if ! grep -q '^BESZEL_SYSTEM_NAME=' "$LOCAL_ENV"; then
-    printf 'BESZEL_SYSTEM_NAME="%s"\n' "$SYSTEM_NAME" >> "$LOCAL_ENV"
-fi
-log "BESZEL_AGENT_KEY written to monitoring/.env"
-
-# ---- 4. Auth + register system ---------------------------------------------
-# Try the superuser collection first (Beszel admin = PocketBase superuser),
-# then fall back to the regular users collection for older versions.
+# ---- 2. Authenticate with hub -----------------------------------------------
+# Login *before* trying to fetch the pubkey: in newer Beszel builds
+# /api/beszel/getkey is auth-only, so unauthenticated GETs come back as
+# 401 + empty body and we'd silently fall through to file fallbacks. Try
+# the superuser collection first (Beszel admin = PocketBase superuser),
+# fall back to the regular users collection for older versions.
 auth_json=""
+AUTH_COLL=""
 for coll in _superusers users; do
     if body=$(curl -fsS -X POST "$HUB_URL/api/collections/$coll/auth-with-password" \
             -H 'Content-Type: application/json' \
@@ -102,6 +75,86 @@ done
 TOKEN=$(echo "$auth_json"   | jq -r '.token')
 USER_ID=$(echo "$auth_json" | jq -r '.record.id')
 log "authenticated as $USER_EMAIL (collection=$AUTH_COLL, id=$USER_ID)"
+
+# ---- 3. Fetch hub public key ------------------------------------------------
+# The hub exposes its SSH public key in several places depending on version.
+# Try every known path and log which one hit, so the next time this fails on
+# a future Beszel version we can point at the actual location.
+PUBKEY=""
+PUBKEY_SOURCE=""
+try_key_source() {
+    local label="$1" out="$2"
+    if [[ -n "$out" && "$out" == ssh-ed25519* ]]; then
+        PUBKEY="$out"
+        PUBKEY_SOURCE="$label"
+        return 0
+    fi
+    return 1
+}
+
+# 3a. Authenticated /api/beszel/getkey (newer versions). Some builds also
+# accept the same endpoint without auth - it's harmless to try unauth first
+# in case auth itself broke against an older build, but the auth'd attempt
+# is the most reliable.
+for hdr in "Authorization: $TOKEN" ""; do
+    if body=$(curl -fsS ${hdr:+-H "$hdr"} "$HUB_URL/api/beszel/getkey" 2>/dev/null); then
+        candidate=$(echo "$body" | jq -r '.key // .data.key // empty' 2>/dev/null || true)
+        if try_key_source "/api/beszel/getkey${hdr:+ (auth)}" "$candidate"; then break; fi
+    fi
+done
+
+# 3b. Read from the hub container's filesystem. Beszel has shifted the path
+# across releases - cover all the historical and current locations. We end
+# with a wide find as a backstop so future relocations still work.
+if [[ -z "$PUBKEY" ]]; then
+    for path in \
+        /beszel_data/id_ed25519.pub \
+        /beszel_data/pb_data/id_ed25519.pub \
+        /beszel_data/data/id_ed25519.pub \
+        /beszel_data/keys/id_ed25519.pub \
+        /data/id_ed25519.pub \
+        /pb_data/id_ed25519.pub
+    do
+        if cand=$(podman exec beszel cat "$path" 2>/dev/null); then
+            try_key_source "podman exec beszel cat $path" "$cand" && break
+        fi
+    done
+fi
+
+# 3c. Last-resort wide search inside the container. Slow on a populated FS
+# but Beszel data dir is tiny.
+if [[ -z "$PUBKEY" ]]; then
+    if found=$(podman exec beszel sh -c 'find / -name id_ed25519.pub -not -path "*/proc/*" 2>/dev/null | head -1'); then
+        if [[ -n "$found" ]]; then
+            cand=$(podman exec beszel cat "$found" 2>/dev/null || true)
+            try_key_source "podman exec find: $found" "$cand" || true
+        fi
+    fi
+fi
+
+if [[ -z "$PUBKEY" ]]; then
+    log "exhausted pubkey sources. Tried API and these container paths:"
+    log "  /beszel_data/id_ed25519.pub /beszel_data/pb_data/... /beszel_data/data/..."
+    log "  /beszel_data/keys/... /data/... /pb_data/... + find / -name id_ed25519.pub"
+    log "Add the agent manually in the UI and copy the key into monitoring/.env"
+    log "as BESZEL_AGENT_KEY=, then podman-compose up -d agent."
+    die "could not retrieve hub public key"
+fi
+log "hub public key retrieved (source: $PUBKEY_SOURCE)"
+
+# ---- 4. Persist key to monitoring/.env --------------------------------------
+touch "$LOCAL_ENV"
+chmod 600 "$LOCAL_ENV"
+if grep -q '^BESZEL_AGENT_KEY=' "$LOCAL_ENV"; then
+    # Escape forward slashes for sed. The SSH key format doesn't contain "|".
+    sed -i "s|^BESZEL_AGENT_KEY=.*|BESZEL_AGENT_KEY=\"$PUBKEY\"|" "$LOCAL_ENV"
+else
+    printf 'BESZEL_AGENT_KEY="%s"\n' "$PUBKEY" >> "$LOCAL_ENV"
+fi
+if ! grep -q '^BESZEL_SYSTEM_NAME=' "$LOCAL_ENV"; then
+    printf 'BESZEL_SYSTEM_NAME="%s"\n' "$SYSTEM_NAME" >> "$LOCAL_ENV"
+fi
+log "BESZEL_AGENT_KEY written to monitoring/.env"
 
 # Check if a system with this name already exists (idempotency).
 filter_enc=$(jq -rn --arg n "$SYSTEM_NAME" '"name=\"\($n)\""' | jq -sRr @uri)
