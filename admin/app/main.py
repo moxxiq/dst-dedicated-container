@@ -26,6 +26,7 @@ import configparser
 import io
 import json
 import os
+import re
 
 # Names that archive tools (macOS Finder, Windows Explorer, ...) leave at the
 # top level alongside the real payload. Filter these from flatten checks AND
@@ -324,6 +325,41 @@ WIZARD_DEFAULTS: dict[str, Any] = {
     "pvp": False,
     "description": "Friendly cooperative world.",
 }
+
+
+_WORKSHOP_ID_RE = re.compile(r"workshop-(\d+)")
+
+
+def summarize_mods() -> dict[str, Any]:
+    """Parse the workshop IDs out of dedicated_server_mods_setup.lua + both
+    shards' modoverrides.lua, plus list any directly sideloaded mod folders
+    under mods/user-mods/. Used to render the "currently configured" line in
+    the Mods section of the dashboard."""
+    workshop_ids: set[str] = set()
+    setup = MODS_DIR / "dedicated_server_mods_setup.lua"
+    if setup.is_file():
+        try:
+            workshop_ids.update(_WORKSHOP_ID_RE.findall(setup.read_text("utf-8", errors="ignore")))
+        except OSError:
+            pass
+    cd = cluster_dir()
+    for shard in ("Master", "Caves"):
+        f = cd / shard / "modoverrides.lua"
+        if f.is_file():
+            try:
+                workshop_ids.update(_WORKSHOP_ID_RE.findall(f.read_text("utf-8", errors="ignore")))
+            except OSError:
+                pass
+    sideloaded: list[str] = []
+    sideload_dir = MODS_DIR / "user-mods"
+    if sideload_dir.is_dir():
+        for child in sorted(sideload_dir.iterdir()):
+            if child.is_dir() and not child.name.startswith("."):
+                sideloaded.append(child.name)
+    return {
+        "workshop_ids": sorted(workshop_ids, key=lambda s: int(s)),
+        "sideloaded": sideloaded,
+    }
 
 
 def read_active_cluster_settings() -> dict[str, Any]:
@@ -634,6 +670,25 @@ def r2_rclone_env(env: dict[str, str]) -> dict[str, str]:
     return out
 
 
+def _history_path(bucket: str, cluster: str) -> str:
+    return f"r2:{bucket}/clusters/{cluster}/history/"
+
+
+# History filenames carry day-NNNN- prefix so lexicographic sort = newest;
+# legacy backups (before the day-prefix migration) start with an iso-ts so
+# they also sort correctly relative to each other. Mixed lists pick newest
+# correctly because day-prefixed files sort *after* date-prefixed ones,
+# which is fine — the day-prefixed ones are by definition newer.
+def _newest_history_key(history_files: list[dict]) -> dict | None:
+    """Pick the lexicographically-largest .zip / .tar.gz from an rclone lsjson
+    result. Sidecar .mods.json files are filtered out."""
+    archives = [f for f in history_files if (f.get("Name") or "").endswith((".zip", ".tar.gz"))]
+    if not archives:
+        return None
+    archives.sort(key=lambda f: f.get("Name") or "")
+    return archives[-1]
+
+
 def run_backup(tag: str = "manual") -> tuple[bool, str]:
     env = read_env_file()
     if not r2_env_ready(env):
@@ -642,41 +697,50 @@ def run_backup(tag: str = "manual") -> tuple[bool, str]:
         return False, f"Cluster '{CLUSTER_NAME}' not provisioned yet"
 
     rclone_env = r2_rclone_env(env)
-
+    bucket = env["R2_BUCKET"]
     ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
-    tmp = Path(f"/tmp/backup-{ts}-{tag}.tar.gz")
+    # Admin-side manual backups don't share LAST_CYCLES with the entrypoint
+    # (different process, no shared state), so we omit the day prefix and
+    # tag with `manual`. The entrypoint's day-prefixed entries still sort
+    # later (lexicographically larger first byte 'd' > '2' year-prefix).
+    fname = f"{ts}-{tag}.zip"
+    tmp = Path(f"/tmp/backup-{ts}-{tag}.zip")
     try:
-        with tarfile.open(tmp, "w:gz") as tar:
-            tar.add(cluster_dir(), arcname=CLUSTER_NAME)
+        # zipfile is ~5x faster than tarfile on small text files, which is
+        # what cluster saves are. Compression is deflate; saves are highly
+        # compressible so the result lands close to tar.gz size.
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            cd = cluster_dir()
+            for fp in cd.rglob("*"):
+                if fp.name in ARCHIVE_JUNK:
+                    continue
+                if fp.is_file():
+                    zf.write(fp, arcname=str(Path(CLUSTER_NAME) / fp.relative_to(cd)))
 
-        bucket = env["R2_BUCKET"]
-        latest_dst = f"r2:{bucket}/clusters/{CLUSTER_NAME}/latest.tar.gz"
-        hist_dst = f"r2:{bucket}/clusters/{CLUSTER_NAME}/history/{ts}-{tag}.tar.gz"
-
-        for dest in (latest_dst, hist_dst):
-            proc = subprocess.run(
-                ["rclone", "copyto", str(tmp), dest, "--quiet"],
-                capture_output=True,
-                text=True,
-                env=rclone_env,
-                timeout=600,
-            )
-            if proc.returncode != 0:
-                return False, f"rclone failed for {dest}: {proc.stderr.strip()}"
+        hist_dst = f"{_history_path(bucket, CLUSTER_NAME)}{fname}"
+        proc = subprocess.run(
+            ["rclone", "copyto", str(tmp), hist_dst, "--quiet"],
+            capture_output=True, text=True, env=rclone_env, timeout=600,
+        )
+        if proc.returncode != 0:
+            return False, f"rclone failed for {hist_dst}: {proc.stderr.strip()}"
     finally:
         try:
             tmp.unlink()
         except FileNotFoundError:
             pass
-    return True, f"backup pushed ({ts}-{tag})"
+    return True, f"backup pushed ({fname})"
 
 
 # ---- R2 cluster catalog (list / restore / park) ----
 
 def list_r2_clusters() -> list[dict]:
-    """Return clusters that have a latest.tar.gz under r2:<bucket>/clusters/.
+    """Return clusters that have any backup under r2:<bucket>/clusters/<name>/history/.
 
-    Each entry: {"name": str, "size_mb": float, "mtime": "YYYY-MM-DD HH:MM"}.
+    Each entry: {"name", "size_mb", "mtime", "newest_archive"}. Newest is
+    determined by lex-sort of filenames (day-NNNN- prefix sorts newest last,
+    pre-migration <iso-ts>- files sort earlier, both correct).
+
     Returns [] on any error (R2 not configured, network down, empty bucket)
     so the dashboard can render gracefully even when R2 is misconfigured.
     """
@@ -685,7 +749,6 @@ def list_r2_clusters() -> list[dict]:
         return []
     bucket = env["R2_BUCKET"]
     rclone_env = r2_rclone_env(env)
-    # `--dirs-only` lists immediate subdirs of clusters/, each is a cluster name.
     proc = subprocess.run(
         ["rclone", "lsjson", f"r2:{bucket}/clusters/", "--dirs-only"],
         capture_output=True, text=True, env=rclone_env, timeout=20,
@@ -701,10 +764,10 @@ def list_r2_clusters() -> list[dict]:
         name = d.get("Name") or d.get("Path")
         if not name:
             continue
-        # stat the latest.tar.gz to fish out size + mtime in one call.
+        # List the entire history dir for this cluster, pick the newest.
         s = subprocess.run(
-            ["rclone", "lsjson", f"r2:{bucket}/clusters/{name}/latest.tar.gz"],
-            capture_output=True, text=True, env=rclone_env, timeout=15,
+            ["rclone", "lsjson", _history_path(bucket, name), "--files-only"],
+            capture_output=True, text=True, env=rclone_env, timeout=20,
         )
         if s.returncode != 0:
             continue
@@ -712,27 +775,115 @@ def list_r2_clusters() -> list[dict]:
             files = json.loads(s.stdout or "[]")
         except json.JSONDecodeError:
             continue
-        if not files:
+        newest = _newest_history_key(files)
+        if newest is None:
             continue
-        f = files[0]
-        size_mb = round(int(f.get("Size", 0)) / (1024 * 1024), 1)
-        mtime = (f.get("ModTime") or "")[:16].replace("T", " ")
-        out.append({"name": name, "size_mb": size_mb, "mtime": mtime})
+        size_mb = round(int(newest.get("Size", 0)) / (1024 * 1024), 1)
+        mtime = (newest.get("ModTime") or "")[:16].replace("T", " ")
+        out.append({
+            "name": name,
+            "size_mb": size_mb,
+            "mtime": mtime,
+            "newest_archive": newest.get("Name") or "",
+            "history_count": len([f for f in files if (f.get("Name") or "").endswith((".zip", ".tar.gz"))]),
+        })
     out.sort(key=lambda x: x["name"])
     return out
 
 
-def fetch_r2_cluster_to(name: str, dest_dir: Path) -> tuple[bool, str]:
-    """Download r2:<bucket>/clusters/<name>/latest.tar.gz and extract into
-    dest_dir. dest_dir must NOT already exist (caller's responsibility).
-    Returns (ok, message)."""
+def list_r2_history(cluster_name: str) -> list[dict]:
+    """List every backup file under r2:<bucket>/clusters/<name>/history/, newest
+    first. Sidecar .mods.json files are NOT in this list — they're attached
+    to their archive entry by filename suffix matching."""
+    env = read_env_file()
+    if not r2_env_ready(env):
+        return []
+    bucket = env["R2_BUCKET"]
+    rclone_env = r2_rclone_env(env)
+    proc = subprocess.run(
+        ["rclone", "lsjson", _history_path(bucket, cluster_name), "--files-only"],
+        capture_output=True, text=True, env=rclone_env, timeout=20,
+    )
+    if proc.returncode != 0:
+        return []
+    try:
+        files = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    sidecars = {f.get("Name") for f in files if (f.get("Name") or "").endswith(".mods.json")}
+    out: list[dict] = []
+    for f in files:
+        n = f.get("Name") or ""
+        if not n.endswith((".zip", ".tar.gz")):
+            continue
+        size_mb = round(int(f.get("Size", 0)) / (1024 * 1024), 2)
+        mtime = (f.get("ModTime") or "")[:16].replace("T", " ")
+        # Sidecar pairing: <archive>.mods.json (strip the archive ext, append .mods.json)
+        for ext in (".zip", ".tar.gz"):
+            if n.endswith(ext):
+                stem = n[:-len(ext)]
+                break
+        sidecar = f"{stem}.mods.json" if f"{stem}.mods.json" in sidecars else None
+        out.append({"name": n, "size_mb": size_mb, "mtime": mtime, "sidecar": sidecar})
+    out.sort(key=lambda x: x["name"], reverse=True)
+    return out
+
+
+def read_r2_mods_sidecar(cluster_name: str, sidecar_name: str) -> dict:
+    """Download a small `.mods.json` sidecar from R2 and return its contents.
+    Returns {} on any error so the UI can render a placeholder cleanly."""
+    env = read_env_file()
+    if not r2_env_ready(env):
+        return {}
+    bucket = env["R2_BUCKET"]
+    rclone_env = r2_rclone_env(env)
+    src = f"{_history_path(bucket, cluster_name)}{sidecar_name}"
+    proc = subprocess.run(
+        ["rclone", "cat", src],
+        capture_output=True, text=True, env=rclone_env, timeout=15,
+    )
+    if proc.returncode != 0:
+        return {}
+    try:
+        return json.loads(proc.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def fetch_r2_cluster_to(name: str, dest_dir: Path, archive_name: str | None = None) -> tuple[bool, str]:
+    """Download a backup archive from R2 and extract into dest_dir.
+
+    archive_name picks a specific historic file under
+    r2:<bucket>/clusters/<name>/history/. If None, the newest .zip / .tar.gz
+    in that history dir is auto-selected. Both formats are supported on
+    extract, so legacy tar.gz backups still restore.
+
+    dest_dir must NOT already exist (caller's responsibility)."""
     env = read_env_file()
     if not r2_env_ready(env):
         return False, "R2 env vars not set in .env"
     bucket = env["R2_BUCKET"]
-    src = f"r2:{bucket}/clusters/{name}/latest.tar.gz"
     rclone_env = r2_rclone_env(env)
-    tmp = Path(f"/tmp/r2-fetch-{os.getpid()}-{name}.tar.gz")
+
+    if archive_name is None:
+        s = subprocess.run(
+            ["rclone", "lsjson", _history_path(bucket, name), "--files-only"],
+            capture_output=True, text=True, env=rclone_env, timeout=20,
+        )
+        if s.returncode != 0:
+            return False, f"rclone lsjson history: {s.stderr.strip() or 'unknown error'}"
+        try:
+            files = json.loads(s.stdout or "[]")
+        except json.JSONDecodeError:
+            return False, "could not parse rclone lsjson output"
+        newest = _newest_history_key(files)
+        if newest is None:
+            return False, f"no .zip or .tar.gz under clusters/{name}/history/"
+        archive_name = newest.get("Name") or ""
+
+    src = f"{_history_path(bucket, name)}{archive_name}"
+    suffix = ".tar.gz" if archive_name.endswith(".tar.gz") else ".zip"
+    tmp = Path(f"/tmp/r2-fetch-{os.getpid()}-{name}{suffix}")
     try:
         proc = subprocess.run(
             ["rclone", "copyto", src, str(tmp), "--quiet"],
@@ -741,20 +892,25 @@ def fetch_r2_cluster_to(name: str, dest_dir: Path) -> tuple[bool, str]:
         if proc.returncode != 0:
             return False, f"rclone copyto {src}: {proc.stderr.strip() or 'unknown error'}"
         if not tmp.is_file() or tmp.stat().st_size == 0:
-            return False, f"downloaded archive is empty"
+            return False, "downloaded archive is empty"
         dest_dir.mkdir(parents=True)
-        with tarfile.open(tmp, "r:gz") as tar:
-            # Same path-traversal guards as the zip upload path.
-            for m in tar.getmembers():
-                p = Path(m.name)
-                if p.is_absolute() or ".." in p.parts:
-                    return False, f"unsafe entry in archive: {m.name}"
-            tar.extractall(dest_dir)
-        # Strip __MACOSX/.DS_Store first so flatten sees only real payload,
-        # then hoist a single top-level wrapper dir up to dest_dir.
+        if suffix == ".zip":
+            with zipfile.ZipFile(tmp) as zf:
+                for n in zf.namelist():
+                    p = Path(n)
+                    if p.is_absolute() or ".." in p.parts:
+                        return False, f"unsafe entry in archive: {n}"
+                zf.extractall(dest_dir)
+        else:
+            with tarfile.open(tmp, "r:gz") as tar:
+                for m in tar.getmembers():
+                    p = Path(m.name)
+                    if p.is_absolute() or ".." in p.parts:
+                        return False, f"unsafe entry in archive: {m.name}"
+                tar.extractall(dest_dir)
         _strip_archive_junk(dest_dir)
         _flatten_single_top_dir(dest_dir)
-        return True, f"restored {name} ({tmp.stat().st_size // 1024} KiB)"
+        return True, f"restored {archive_name} ({tmp.stat().st_size // 1024} KiB)"
     finally:
         try:
             tmp.unlink()
@@ -795,6 +951,7 @@ def dashboard(request: Request, _: str = Depends(require_auth)) -> HTMLResponse:
             "r2_clusters": list_r2_clusters(),
             "r2_ready": r2_env_ready(env),
             "wizard": read_active_cluster_settings(),
+            "mod_summary": summarize_mods(),
             "adminlist": _read_text_or_empty(adminlist_path),
             "mods_setup": _read_text_or_empty(mods_setup_path),
             "modoverrides_master": _read_text_or_empty(cd / "Master" / "modoverrides.lua"),
@@ -1031,19 +1188,22 @@ def cluster_activate(
 @app.post("/cluster/r2-restore")
 def cluster_r2_restore(
     cluster_name: str = Form(...),
+    archive_name: str = Form(""),
     _: str = Depends(require_auth),
 ) -> RedirectResponse:
     """Stop DST, archive the current active cluster (if any) into parked/,
-    download r2:<bucket>/clusters/<cluster_name>/latest.tar.gz, extract into
-    the active slot, restart DST. Mirror of activate-parked but for R2."""
+    download a backup from r2:<bucket>/clusters/<cluster_name>/history/,
+    extract into the active slot, restart DST. archive_name picks a specific
+    historic file; empty = newest."""
     name = safe_name(cluster_name)
+    arch = archive_name.strip() or None
 
     # Stage download into a temp slot so a partial/broken archive doesn't
     # leave us cluster-less. Move into place atomically once ready.
     staging = SAVES_DIR / f".r2-staging-{os.getpid()}-{name}"
     if staging.exists():
         shutil.rmtree(staging)
-    ok, msg = fetch_r2_cluster_to(name, staging)
+    ok, msg = fetch_r2_cluster_to(name, staging, archive_name=arch)
     if not ok:
         if staging.exists():
             shutil.rmtree(staging, ignore_errors=True)
@@ -1073,24 +1233,54 @@ def cluster_r2_restore(
 @app.post("/cluster/r2-park")
 def cluster_r2_park(
     cluster_name: str = Form(...),
+    archive_name: str = Form(""),
     park_name: str = Form(""),
     _: str = Depends(require_auth),
 ) -> RedirectResponse:
-    """Download r2:<bucket>/clusters/<cluster_name>/latest.tar.gz into a new
-    parked/ slot. Caller can pick a different park_name to avoid colliding
-    with the live cluster name; defaults to the same name."""
+    """Download a backup from R2 history into a new parked/ slot. archive_name
+    selects a specific historic backup, empty = newest. park_name defaults to
+    the source cluster name."""
     src_name = safe_name(cluster_name)
+    arch = archive_name.strip() or None
     dest_name = safe_name(park_name) if park_name else src_name
     PARKED_DIR.mkdir(exist_ok=True)
     dest = PARKED_DIR / dest_name
     if dest.exists():
         raise HTTPException(status_code=409, detail=f"Parked slot '{dest_name}' already exists")
-    ok, msg = fetch_r2_cluster_to(src_name, dest)
+    ok, msg = fetch_r2_cluster_to(src_name, dest, archive_name=arch)
     if not ok:
         if dest.exists():
             shutil.rmtree(dest, ignore_errors=True)
         raise HTTPException(status_code=502, detail=msg)
     return RedirectResponse("/", status_code=303)
+
+
+# ---- R2 history browser (drill-in for one cluster) ----
+
+@app.get("/api/r2/history/{cluster_name}")
+def api_r2_history(cluster_name: str, _: str = Depends(require_auth)) -> Response:
+    """JSON: every backup file under r2:<bucket>/clusters/<cluster_name>/history/,
+    newest first, with sidecar pairing info for the UI's mods preview."""
+    name = safe_name(cluster_name)
+    return Response(
+        content=json.dumps({"cluster": name, "history": list_r2_history(name)}),
+        media_type="application/json",
+    )
+
+
+@app.get("/api/r2/mods/{cluster_name}/{sidecar}")
+def api_r2_mods(cluster_name: str, sidecar: str, _: str = Depends(require_auth)) -> Response:
+    """JSON: read and return a small <archive>.mods.json sidecar from R2."""
+    name = safe_name(cluster_name)
+    # The sidecar filename is operator-supplied via the UI's data attribute,
+    # but it always comes from the response of api_r2_history. Defensive
+    # check: must end in .mods.json, no traversal.
+    if not sidecar.endswith(".mods.json") or "/" in sidecar or ".." in sidecar:
+        raise HTTPException(status_code=400, detail="invalid sidecar name")
+    return Response(
+        content=json.dumps(read_r2_mods_sidecar(name, sidecar)),
+        media_type="application/json",
+    )
 
 
 # ---- Cluster: delete parked ----
@@ -1136,6 +1326,7 @@ def mods_save(
     mods_setup: str = Form(""),
     modoverrides_master: str = Form(""),
     modoverrides_caves: str = Form(""),
+    restart: str = Form("0"),
     _: str = Depends(require_auth),
 ) -> RedirectResponse:
     """Write the workshop list + both shards' modoverrides.
@@ -1144,6 +1335,11 @@ def mods_save(
     automatically enabled on Caves, and vice versa). Common practice is
     to keep the two in sync; the UI presents them as separate textareas
     but the caller can copy-paste to unify.
+
+    restart=1 bounces the DST container (graceful, ~90 s) so the changes
+    take effect immediately. Without it, mods updates only land on the
+    next manual restart — a common source of "mods aren't applying"
+    confusion.
     """
     MODS_DIR.mkdir(exist_ok=True)
     (MODS_DIR / "dedicated_server_mods_setup.lua").write_text(mods_setup, encoding="utf-8")
@@ -1151,6 +1347,100 @@ def mods_save(
         cd = cluster_dir()
         (cd / "Master" / "modoverrides.lua").write_text(modoverrides_master, encoding="utf-8")
         (cd / "Caves" / "modoverrides.lua").write_text(modoverrides_caves, encoding="utf-8")
+    if restart == "1":
+        # Best-effort. If DST isn't running, podman restart errors -> ignore.
+        try:
+            podman("restart", "-t", "90", DST_CONTAINER, timeout=120)
+        except subprocess.SubprocessError:
+            pass
+    return RedirectResponse("/", status_code=303)
+
+
+@app.post("/mods/upload")
+async def mods_upload(
+    archive_field: UploadFile = File(..., alias="archive"),
+    restart: str = Form("0"),
+    _: str = Depends(require_auth),
+) -> RedirectResponse:
+    """Sideload custom mod folders by uploading a zip or tar.gz. Each
+    top-level entry inside the archive should be a mod folder containing
+    `modinfo.lua` (DST's required metadata file). Extracted into
+    mods/user-mods/, where the entrypoint's do_mods_sync copies them into
+    the DST install on the next boot. Existing folders with the same name
+    are replaced."""
+    raw = await archive_field.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty upload")
+
+    is_zip = raw[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+    is_gz = raw[:2] == b"\x1f\x8b"
+
+    sideload_dir = MODS_DIR / "user-mods"
+    sideload_dir.mkdir(parents=True, exist_ok=True)
+
+    # Stage extraction into a tmp dir so a half-extracted upload can't
+    # corrupt the live sideload tree.
+    staging = MODS_DIR / f".upload-staging-{os.getpid()}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir()
+
+    try:
+        if is_zip:
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(raw))
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail="Not a valid zip file")
+            for n in zf.namelist():
+                p = Path(n)
+                if p.is_absolute() or ".." in p.parts:
+                    raise HTTPException(status_code=400, detail=f"Unsafe entry: {n}")
+            zf.extractall(staging)
+        elif is_gz:
+            try:
+                tf = tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz")
+            except tarfile.TarError as exc:
+                raise HTTPException(status_code=400, detail=f"Not a valid tar.gz: {exc}")
+            for m in tf.getmembers():
+                p = Path(m.name)
+                if p.is_absolute() or ".." in p.parts:
+                    raise HTTPException(status_code=400, detail=f"Unsafe entry: {m.name}")
+            tf.extractall(staging)
+            tf.close()
+        else:
+            raise HTTPException(status_code=400, detail="Upload must be .zip or .tar.gz")
+
+        _strip_archive_junk(staging)
+        _flatten_single_top_dir(staging)  # only flattens if the zip wraps everything in one dir
+
+        # Move each top-level dir into mods/user-mods/, replacing any
+        # existing folder with the same name. Files at staging root are
+        # rejected — DST mods must be folders containing modinfo.lua.
+        moved: list[str] = []
+        for child in staging.iterdir():
+            if child.name in ARCHIVE_JUNK or child.name.startswith("."):
+                continue
+            if not child.is_dir():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Top-level entry '{child.name}' is a file, not a mod folder. "
+                           "DST mods are directories with modinfo.lua inside.",
+                )
+            target = sideload_dir / child.name
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.move(str(child), str(target))
+            moved.append(child.name)
+        if not moved:
+            raise HTTPException(status_code=400, detail="No mod folders found in archive")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    if restart == "1":
+        try:
+            podman("restart", "-t", "90", DST_CONTAINER, timeout=120)
+        except subprocess.SubprocessError:
+            pass
     return RedirectResponse("/", status_code=303)
 
 

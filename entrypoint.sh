@@ -32,9 +32,12 @@
 #
 # Save backup trigger: 60s poll loop that c_evals into the master shard's
 # stdin FIFO and parses TheWorld.state.cycles + #AllPlayers from server_log.
-# Backup fires only on day rollover or when the last player leaves. Graceful
-# shutdown also fires one final backup. History filenames are prefixed with
-# day-NNNN so they sort by in-game time, not just wall clock.
+# Backup fires ONLY on day rollover or when the last player leaves. No
+# shutdown/exit/crash backups - those produced near-duplicate archives.
+# Operator can hit "Backup to R2 now" in the admin UI for an ad-hoc snapshot.
+# Format: zip (history-only, no latest pointer; admin scans the history/
+# directory for the lexicographically newest entry). Sidecar
+# <name>.mods.json next to each zip lists workshop IDs for fast UI preview.
 #
 # Graceful shutdown: on SIGTERM/SIGINT, write `c_save()` then `c_shutdown(true)`
 # into both FIFOs, wait for both processes to exit, final R2 push.
@@ -117,6 +120,25 @@ do_mods_sync() {
   else
     log "no user mods setup found at $USER_MODS_SETUP (ok — no workshop mods)"
   fi
+
+  # Sideload: copy every directory under user-mods/user-mods/ into the DST
+  # install's mods/ tree. Admin's /mods/upload endpoint extracts uploads
+  # there. Each subdir becomes one mod folder visible to DST exactly the
+  # same way workshop downloads end up under mods/workshop-NNNN/.
+  local sideload_root="$HOME/user-mods/user-mods"
+  if [ -d "$sideload_root" ]; then
+    local count=0
+    for d in "$sideload_root"/*/; do
+      [ -d "$d" ] || continue
+      local name; name="$(basename "$d")"
+      [ "$name" = "." ] || [ "$name" = ".." ] && continue
+      cp -r "$d" "$DST_DIR/mods/$name"
+      count=$((count + 1))
+    done
+    if (( count > 0 )); then
+      log "synced $count sideloaded mod folder(s) into DST install"
+    fi
+  fi
 }
 
 do_cluster_token() {
@@ -147,20 +169,45 @@ cluster_ready() {
 do_r2_restore_once() {
   # R2 is guaranteed configured by launch_dst → r2_require. This function is
   # also callable from debug shells; guard left in for that edge case.
+  #
+  # No `latest` pointer is maintained any more — we scan the history dir for
+  # the lexicographically newest entry. Filenames are `day-NNNN-<utc-ts>-<tag>`
+  # so lexicographic sort = in-game-time sort = wall-clock sort, all the same.
+  # Both `.zip` (current) and `.tar.gz` (legacy) are recognised.
   r2_configured || return 1
-  log "cluster missing locally — attempting R2 restore"
+  log "cluster missing locally — attempting R2 restore (newest history entry)"
   r2_rclone_env
   mkdir -p "$KLEI_DIR/DoNotStarveTogether"
-  local tmp=/tmp/restore.tar.gz
-  if rclone copyto "r2:$R2_BUCKET/clusters/$CLUSTER_NAME/latest.tar.gz" "$tmp" 2>/dev/null; then
-    tar xzf "$tmp" -C "$KLEI_DIR/DoNotStarveTogether/"
+  local hist_dir="r2:$R2_BUCKET/clusters/$CLUSTER_NAME/history"
+  local newest
+  newest=$(rclone lsf --files-only "$hist_dir" 2>/dev/null \
+           | grep -E '\.(zip|tar\.gz)$' | sort | tail -1)
+  if [[ -z "$newest" ]]; then
+    log "no R2 backup found under $hist_dir"
+    return 1
+  fi
+  local ext="${newest##*.}"        # "zip" or "gz"
+  local tmp="/tmp/restore.${newest##*-}"   # any unique suffix - we'll dispatch on extension
+  tmp="/tmp/restore-$$.${newest##*.}"
+  if [[ "$newest" == *.tar.gz ]]; then tmp="/tmp/restore-$$.tar.gz"; ext="tar.gz"; fi
+  if ! rclone copyto "$hist_dir/$newest" "$tmp" 2>/dev/null; then
     rm -f "$tmp"
-    log "restored cluster from R2 (latest.tar.gz)"
-    return 0
+    log "rclone copyto failed for $hist_dir/$newest"
+    return 1
+  fi
+  if [[ "$ext" == "zip" ]]; then
+    if ! command -v unzip >/dev/null; then
+      rm -f "$tmp"
+      log "unzip not available in image - rebuild after pulling latest Dockerfile"
+      return 1
+    fi
+    unzip -q "$tmp" -d "$KLEI_DIR/DoNotStarveTogether/"
+  else
+    tar xzf "$tmp" -C "$KLEI_DIR/DoNotStarveTogether/"
   fi
   rm -f "$tmp"
-  log "no R2 backup at clusters/$CLUSTER_NAME/latest.tar.gz"
-  return 1
+  log "restored cluster from R2 ($newest)"
+  return 0
 }
 
 # Policy (2026-04-20, per user): do NOT auto-generate a fresh world when both
@@ -225,10 +272,42 @@ LAST_PLAYERS=-1
 backup_history_name() {
   local tag="$1" ts="$2"
   if [[ $LAST_CYCLES -ge 0 ]]; then
-    printf 'day-%04d-%s-%s.tar.gz' "$LAST_CYCLES" "$ts" "$tag"
+    printf 'day-%04d-%s-%s.zip' "$LAST_CYCLES" "$ts" "$tag"
   else
-    printf '%s-%s.tar.gz' "$ts" "$tag"
+    printf '%s-%s.zip' "$ts" "$tag"
   fi
+}
+
+# Build a small JSON sidecar listing the workshop IDs and per-shard
+# modoverrides bodies so the admin UI can preview what mods this backup
+# carried without downloading the full archive. Best-effort: missing files
+# turn into empty fields rather than failing the whole backup.
+write_mods_sidecar() {
+  local out="$1"
+  local setup_file="$HOME/user-mods/dedicated_server_mods_setup.lua"
+  local master_mods="$CLUSTER_DIR/Master/modoverrides.lua"
+  local caves_mods="$CLUSTER_DIR/Caves/modoverrides.lua"
+
+  # Pull `workshop-NNNN` IDs out of every file we can find.
+  local ids
+  ids=$(grep -hoE 'workshop-[0-9]+' "$setup_file" "$master_mods" "$caves_mods" 2>/dev/null \
+        | sort -u | sed 's/workshop-//')
+
+  # Render JSON without jq dependency (we use it elsewhere, but this
+  # sidecar must succeed even if jq is somehow missing).
+  {
+    printf '{\n'
+    printf '  "cluster_name": "%s",\n' "$CLUSTER_NAME"
+    printf '  "captured_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "in_game_day": %d,\n' "${LAST_CYCLES:-0}"
+    printf '  "workshop_ids": ['
+    local first=1
+    for id in $ids; do
+      if (( first )); then first=0; else printf ', '; fi
+      printf '"%s"' "$id"
+    done
+    printf ']\n}\n'
+  } > "$out"
 }
 
 do_backup() {
@@ -240,21 +319,35 @@ do_backup() {
     log "no cluster dir yet, skipping backup"
     return 0
   fi
+  if ! command -v zip >/dev/null; then
+    log "zip binary not found — rebuild image after pulling latest Dockerfile"
+    return 1
+  fi
   r2_rclone_env
-  local tmp="/tmp/backup-$$-$(date +%s).tar.gz"
-  if ! tar czf "$tmp" -C "$KLEI_DIR/DoNotStarveTogether" "$CLUSTER_NAME"; then
-    log "tar failed for backup (tag=$tag)"
+  local ts; ts="$(date -u +%Y-%m-%dT%H%M%SZ)"
+  local hist; hist="$(backup_history_name "$tag" "$ts")"
+  local tmp="/tmp/backup-$$-${ts}.zip"
+  local meta="${tmp%.zip}.mods.json"
+  # zip wants to be cd'd into the parent so paths in the archive start with
+  # CLUSTER_NAME/. -q suppresses per-file output, -r recurses, -X strips
+  # extra-attributes that vary by host.
+  if ! ( cd "$KLEI_DIR/DoNotStarveTogether" && zip -qrX "$tmp" "$CLUSTER_NAME" ); then
+    log "zip failed for backup (tag=$tag)"
     rm -f "$tmp"
     return 1
   fi
-  rclone copyto "$tmp" "r2:$R2_BUCKET/clusters/$CLUSTER_NAME/latest.tar.gz" --quiet \
-    || log "R2 latest upload failed"
-  local ts; ts="$(date -u +%Y-%m-%dT%H%M%SZ)"
-  local hist; hist="$(backup_history_name "$tag" "$ts")"
+  write_mods_sidecar "$meta" || true
+
+  # Single uploaded artifact per backup. No `latest.zip` pointer is
+  # maintained any more — list-newest scans the history dir directly.
   rclone copyto "$tmp" "r2:$R2_BUCKET/clusters/$CLUSTER_NAME/history/${hist}" --quiet \
     || log "R2 history upload failed"
-  rm -f "$tmp"
-  log "backup pushed to R2 (tag=$tag day=${LAST_CYCLES})"
+  if [[ -s "$meta" ]]; then
+    rclone copyto "$meta" "r2:$R2_BUCKET/clusters/$CLUSTER_NAME/history/${hist%.zip}.mods.json" --quiet \
+      || log "R2 sidecar upload failed (non-fatal)"
+  fi
+  rm -f "$tmp" "$meta"
+  log "backup pushed to R2 (tag=$tag day=${LAST_CYCLES} → $hist)"
 }
 
 # Export so subshells can call into these functions.
@@ -371,7 +464,11 @@ graceful_stop() {
   wait_or_kill Master "${MASTER_PID:-}" 60
   wait_or_kill Caves  "${CAVES_PID:-}"  60
   [ -n "${POLLER_PID:-}" ] && kill "$POLLER_PID" 2>/dev/null || true
-  do_backup shutdown || true
+  # No R2 push here on purpose. The poll loop's day-rollover and
+  # empty-server triggers cover the meaningful save events; pushing on
+  # every shutdown produced duplicate near-identical archives in R2 with
+  # no extra recoverable state. Operator can hit "Backup to R2 now" in
+  # the admin UI before stopping if they want a guaranteed snapshot.
   exit 0
 }
 
@@ -458,8 +555,11 @@ launch_dst() {
   log "Master exited rc=$MASTER_RC, Caves exited rc=$CAVES_RC"
 
   [ -n "${POLLER_PID:-}" ] && kill "$POLLER_PID" 2>/dev/null || true
-  # Best-effort crash-path backup.
-  do_backup exit || true
+  # No crash-path backup here either. If both shards exited unexpectedly
+  # the most recent in-game state is whatever the poll loop captured
+  # (day-rollover or empty-server trigger), which is the same data we'd
+  # tar up here anyway. Re-pushing on exit only adds an "exit"-tagged
+  # near-duplicate.
   if [ "$MASTER_RC" -ne 0 ]; then exit "$MASTER_RC"; fi
   exit "$CAVES_RC"
 }
