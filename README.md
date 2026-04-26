@@ -114,7 +114,7 @@ steamCMD/
 
 ### Two bind-mounted folders (edit freely on host)
 - `./saves/` → `/home/ubuntu/.klei/DoNotStarveTogether` — one subdir per cluster.
-- `./mods/`  → `/home/ubuntu/user-mods` — the entrypoint copies `dedicated_server_mods_setup.lua` into the DST install on each start.
+- `./mods/`  → `/home/ubuntu/user-mods` — the entrypoint copies `dedicated_server_mods_setup.lua` into the DST install on each start, plus every directory under `mods/user-mods/` (sideloaded custom mod folders that aren't on Steam Workshop).
 
 ---
 
@@ -143,9 +143,30 @@ Required in `.env`:
 ```bash
 ./run-dst.sh              # start DST (detached, ports open, restart policy)
 ./run-dst.sh logs         # follow logs
-./run-dst.sh stop         # graceful stop: c_save → c_shutdown → final R2 push → exit
+./run-dst.sh stop         # graceful stop: c_save → c_shutdown → exit (R2 push happens via the next poll trigger; use the admin "Backup to R2 now" button if you want a guaranteed snapshot before stopping)
 ./run-dst.sh restart      # stop + start
 ```
+
+### Backup model
+
+Backups are zip archives pushed only on three events — no per-save churn:
+
+1. **In-game day rollover** — poll loop in the entrypoint c_evals into the master shard via FIFO every 60 s, tracks `TheWorld.state.cycles`, fires `do_backup day` when it advances.
+2. **Empty server** — same loop watches `#AllPlayers`; fires `do_backup empty` on the >0 → 0 transition.
+3. **Manual** — admin panel **Backup to R2 now** button, or POST `/backup/trigger`.
+
+R2 layout (per cluster):
+```
+r2:<bucket>/clusters/<CLUSTER_NAME>/history/
+  day-0001-2026-04-25T231500Z-day.zip
+  day-0001-2026-04-25T231500Z-day.mods.json    (sidecar — workshop IDs)
+  day-0002-…-day.zip
+  …
+  2026-04-25T230000Z-manual.zip
+  2026-04-25T230000Z-manual.mods.json
+```
+
+No `latest.zip` pointer is maintained. The admin UI and the entrypoint's first-boot R2 restore both scan the `history/` directory and pick the lexicographically newest entry — which is the in-game-time newest because of the `day-NNNN-` prefix. Legacy `.tar.gz` backups (from before this scheme) are still recognized on read.
 
 Under the hood: `podman run -d --name dst --restart unless-stopped -p 10999:10999/udp ... local/steamcmd:latest dst`.
 

@@ -20,11 +20,18 @@ When you let the bootstrap install Beszel (`INSTALL_BESZEL=y`):
    `.env` — `USER_EMAIL`/`USER_PASSWORD` env vars are a PocketBase
    one-shot: it creates the first user on an empty DB and silently
    ignores these vars on all subsequent boots.
-3. `autowire.sh` logs in via the REST API, fetches the hub's SSH
-   public key, creates a `systems` record pointing at
-   `127.0.0.1:45876`, and writes the key to `monitoring/.env`.
-4. Agent restarts with `BESZEL_AGENT_KEY` set and starts accepting
-   hub connections — metrics appear in the UI within ~30 s.
+3. `autowire.sh` authenticates against the hub REST API, fetches the
+   hub's SSH public key (tries the auth'd `/api/beszel/getkey`
+   endpoint first, then six known on-disk paths via `podman exec
+   beszel cat`, plus a wide `find / -name id_ed25519.pub` as last
+   resort), creates a `systems` record pointing at `127.0.0.1:45876`,
+   and writes the key to `monitoring/.env`. The script logs which
+   source ended up supplying the key, so future Beszel image bumps
+   that move the file around can be diagnosed at a glance.
+4. Agent restarts (with `XDG_RUNTIME_DIR` re-derived from `id -u` so
+   the podman socket bind-mount resolves correctly even when invoked
+   under bare `su -`) and `BESZEL_AGENT_KEY` is now set — metrics
+   appear in the UI within ~30 s.
 
 Log in at `http://<vps-ip>:8090`:
 
