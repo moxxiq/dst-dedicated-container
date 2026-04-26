@@ -35,7 +35,12 @@ services:
     volumes:
       # Bind the whole project root at /data so the panel can edit saves/,
       # mods/, parked/, .env, etc. through stable paths.
-      - ..:/data:U
+      # No `:U` here on purpose. The bootstrap already chown -Rs the project
+      # tree to dst:dst (host UID 1001), and run-dst.sh runs DST with
+      # --userns=keep-id:uid=1000,gid=1000 so its ubuntu (1000) maps to that
+      # same host UID. Adding `:U` would auto-chown the entire tree to admin's
+      # container UID on every `up`, racing DST writes for no benefit.
+      - ..:/data
       # Podman socket from host — lets the panel run `podman start dst` etc.
       # Rootless path on Linux: /run/user/1000/podman/podman.sock
       # If that doesn't exist, fall back to /run/podman/podman.sock (root) or

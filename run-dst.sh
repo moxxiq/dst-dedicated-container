@@ -72,6 +72,10 @@ case "${1:-start}" in
       "${ENV_ARGS[@]}" \
       -v steamcmd-home:/home/ubuntu/.local/share/Steam:U \
       -v dst-server:/home/ubuntu/dst:U \
+      `# saves/ and mods/ have no :U on purpose. Bootstrap chown -Rs them` \
+      `# to host dst:dst (UID 1001), keep-id above maps that to container` \
+      `# ubuntu (1000), and admin runs as host UID 1001 too - all three` \
+      `# write at the same UID, no chown needed. Adding :U would race admin.` \
       -v "$SAVES_DIR":/home/ubuntu/.klei/DoNotStarveTogether \
       -v "$MODS_DIR":/home/ubuntu/user-mods \
       "$IMAGE" dst
