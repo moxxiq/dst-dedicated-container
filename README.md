@@ -32,6 +32,57 @@ Override the Beszel email via `BESZEL_USER_EMAIL` in `.env` before first hub boo
 
 ---
 
+## Operations cheatsheet
+
+All commands run on the VPS as the `dst` user (`ssh dst@<vps>`). Escalating in severity within each service: **restart** (graceful) → **cold cycle** (stop + start) → **kill** (force, when graceful hangs) → **rebuild** (re-create from current image / compose).
+
+### DST game server
+
+| Action | Command |
+| --- | --- |
+| Restart (graceful — `c_save` + final R2 push, ~90 s) | from web UI: *Restart*, or `podman stop -t 90 dst && podman start dst` |
+| Cold cycle (no graceful save, fast) | `podman restart -t 0 dst` |
+| Force-kill (when stop hangs past timeout) | `podman kill dst && podman start dst` |
+| Rebuild image after `git pull` | `cd ~/steamCMD && podman build --platform=linux/amd64 -t local/steamcmd:latest . && ./run-dst.sh restart` |
+| Recreate container (new flags / env) | `cd ~/steamCMD && ./run-dst.sh start` (the script does `podman rm -f` first) |
+
+### Admin panel
+
+| Action | Command |
+| --- | --- |
+| Restart | `podman restart dst-admin` |
+| Cold cycle | `podman stop dst-admin && podman start dst-admin` |
+| Force-kill | `podman kill dst-admin && podman start dst-admin` |
+| Rebuild image after `git pull` | `cd ~/steamCMD/admin && podman build --platform=linux/amd64 -t local/dst-admin:latest . && podman-compose down && set -a && . ~/steamCMD/.env && set +a && podman-compose up -d` |
+
+### Beszel monitoring
+
+| Action | Command |
+| --- | --- |
+| Restart hub | `podman restart beszel` |
+| Restart agent (after editing `BESZEL_AGENT_KEY`) | `cd ~/steamCMD/monitoring && set -a && . ~/steamCMD/.env && set +a && podman-compose up -d agent` |
+| Re-pair (regenerate key + system record) | `cd ~/steamCMD/monitoring && ./autowire.sh` |
+| Whole stack down + up | `cd ~/steamCMD/monitoring && podman-compose down && set -a && . ~/steamCMD/.env && set +a && podman-compose up -d` |
+
+### Host-level (run as root with `sudo`)
+
+| Action | Command |
+| --- | --- |
+| Bounce the rootless podman REST socket (admin uses this) | `sudo systemctl restart podman-api-dst.service` |
+| Verify socket is listening | `sudo systemctl status podman-api-dst.service --no-pager` |
+| Whole-host reboot (cleanest reset; containers come back via `podman-restart.service`) | `sudo reboot` |
+
+### Diagnostics
+
+| Question | Command |
+| --- | --- |
+| Are all containers up? | `podman ps --format '{{.Names}} {{.Status}}'` |
+| What does the DST entrypoint say? | `podman logs --tail 60 dst` |
+| What does the master shard say? | `podman exec dst tail -60 /home/ubuntu/.klei/DoNotStarveTogether/$CLUSTER_NAME/Master/server_log.txt` |
+| Is `podman ps` hanging? | one stuck `podman ps` holds the sqlite lock and freezes others. `pkill -9 -f 'podman ps'` and retry. |
+
+---
+
 ## Project layout
 
 ```
