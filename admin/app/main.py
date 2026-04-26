@@ -26,6 +26,50 @@ import configparser
 import io
 import json
 import os
+
+# Names that archive tools (macOS Finder, Windows Explorer, ...) leave at the
+# top level alongside the real payload. Filter these from flatten checks AND
+# delete them after extraction so the parked dir matches what DST expects.
+ARCHIVE_JUNK = frozenset({"__MACOSX", ".DS_Store", "Thumbs.db", "desktop.ini"})
+
+
+def _strip_archive_junk(root) -> None:
+    """Remove __MACOSX/, .DS_Store, etc anywhere under `root`. Called after
+    extracting an uploaded archive so a Mac/Windows-zipped backup behaves
+    the same as a clean Linux tar."""
+    import shutil as _shutil
+    for entry in list(root.rglob("*")):
+        if entry.name in ARCHIVE_JUNK:
+            if entry.is_dir():
+                _shutil.rmtree(entry, ignore_errors=True)
+            else:
+                try:
+                    entry.unlink()
+                except OSError:
+                    pass
+
+
+def _flatten_single_top_dir(dest) -> None:
+    """If `dest` contains exactly one real subdir (ignoring junk + dotfiles)
+    and no cluster.ini at its own root, hoist that subdir's contents up. The
+    DST cluster format wants cluster.ini directly under the parked slot."""
+    import shutil as _shutil
+    children = [
+        c for c in dest.iterdir()
+        if not c.name.startswith(".") and c.name not in ARCHIVE_JUNK
+    ]
+    if (
+        len(children) == 1
+        and children[0].is_dir()
+        and not (dest / "cluster.ini").exists()
+    ):
+        inner = children[0]
+        for item in inner.iterdir():
+            _shutil.move(str(item), str(dest / item.name))
+        try:
+            inner.rmdir()
+        except OSError:
+            pass
 import secrets
 import shutil
 import subprocess
@@ -706,19 +750,10 @@ def fetch_r2_cluster_to(name: str, dest_dir: Path) -> tuple[bool, str]:
                 if p.is_absolute() or ".." in p.parts:
                     return False, f"unsafe entry in archive: {m.name}"
             tar.extractall(dest_dir)
-        # Backups from entrypoint use `tar -C ... <CLUSTER_NAME>`, which
-        # produces a top-level <CLUSTER_NAME>/ directory inside the archive.
-        # Flatten that so dest_dir/cluster.ini is directly accessible.
-        children = [c for c in dest_dir.iterdir() if not c.name.startswith(".")]
-        if (
-            len(children) == 1
-            and children[0].is_dir()
-            and not (dest_dir / "cluster.ini").exists()
-        ):
-            inner = children[0]
-            for item in inner.iterdir():
-                shutil.move(str(item), str(dest_dir / item.name))
-            inner.rmdir()
+        # Strip __MACOSX/.DS_Store first so flatten sees only real payload,
+        # then hoist a single top-level wrapper dir up to dest_dir.
+        _strip_archive_junk(dest_dir)
+        _flatten_single_top_dir(dest_dir)
         return True, f"restored {name} ({tmp.stat().st_size // 1024} KiB)"
     finally:
         try:
@@ -902,15 +937,11 @@ async def cluster_upload(
         shutil.rmtree(dest, ignore_errors=True)
         raise
 
-    # If the archive contains a single top-level folder (e.g. "my-world/" or
-    # "qkation-cooperative/" from an R2 tar), flatten so dest/cluster.ini is
-    # directly under dest/.
-    children = [c for c in dest.iterdir() if not c.name.startswith(".")]
-    if len(children) == 1 and children[0].is_dir() and not (dest / "cluster.ini").exists():
-        inner = children[0]
-        for item in inner.iterdir():
-            shutil.move(str(item), str(dest / item.name))
-        inner.rmdir()
+    # Strip Mac/Windows archive junk (__MACOSX, .DS_Store, Thumbs.db) so
+    # flatten and DST both see a clean tree, then hoist a single top-level
+    # wrapper dir up to dest/.
+    _strip_archive_junk(dest)
+    _flatten_single_top_dir(dest)
 
     return RedirectResponse("/", status_code=303)
 
