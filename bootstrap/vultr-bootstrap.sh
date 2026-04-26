@@ -164,6 +164,17 @@ if ! id "$DST_USER" >/dev/null 2>&1; then
 fi
 loginctl enable-linger "$DST_USER"
 
+# Auto-restart user containers on host reboot. `--restart unless-stopped`
+# only survives within the same podman daemon lifetime; on a host reboot
+# rootless containers come up in "Created" state and stay there. The
+# stock podman-restart.service runs `podman start --all` against the
+# user's bolt/sqlite db on user-systemd boot, which (with linger above)
+# fires once at host boot. Idempotent - enabling an already-enabled unit
+# is a no-op. Run via --machine=<user>@.host so we don't need a live
+# user dbus session.
+systemctl --user --machine="${DST_USER}@.host" enable podman-restart.service \
+    >/dev/null 2>&1 || warn "could not enable podman-restart.service for ${DST_USER}"
+
 # Put dst in the sudo group so the operator can `sudo <cmd>` from an SSH
 # session as dst (e.g. re-run this bootstrap, install packages, edit UFW).
 # They'll authenticate with ADMIN_PASSWORD (set below). Idempotent; adding
