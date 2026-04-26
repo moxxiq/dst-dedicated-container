@@ -14,3 +14,6 @@ __pycache__/
 # Non-interactive bootstrap vars (secrets — user creates from bootstrap.vars.example)
 bootstrap/bootstrap.vars
 bootstrap.vars
+
+testr2.py
+ssh-mcp/
