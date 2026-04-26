@@ -114,6 +114,40 @@
     </section>
 
     <section>
+      <h2>R2 cloud backups ({{ r2_clusters|length }})</h2>
+      {% if r2_clusters %}
+      <p class="muted">Each row is one cluster name with a <code>latest.tar.gz</code> in R2 (size + UTC mtime). <strong>Restore</strong> stops DST, archives the current active cluster into parked/, then downloads and activates the R2 backup. <strong>Park a copy</strong> downloads into parked/ without touching the live game.</p>
+      <table>
+        <thead><tr><th>Name</th><th>Latest size</th><th>Modified (UTC)</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for c in r2_clusters %}
+          <tr>
+            <td><code>{{ c.name }}</code></td>
+            <td>{{ c.size_mb }} MB</td>
+            <td>{{ c.mtime }}</td>
+            <td>
+              <form method="post" action="/cluster/r2-restore" class="inline" onsubmit="return confirm('Stop DST, archive current cluster, and restore {{ c.name }} from R2?')">
+                <input type="hidden" name="cluster_name" value="{{ c.name }}" />
+                <button type="submit">Restore</button>
+              </form>
+              <form method="post" action="/cluster/r2-park" class="inline">
+                <input type="hidden" name="cluster_name" value="{{ c.name }}" />
+                <input type="text" name="park_name" placeholder="park as… (default: {{ c.name }})" size="22" />
+                <button type="submit">Park a copy</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% elif r2_ready %}
+      <p class="muted">No R2 backups found at <code>r2:&lt;bucket&gt;/clusters/</code> yet. Backups appear here once the entrypoint or the manual backup button has pushed at least one save.</p>
+      {% else %}
+      <p class="muted">R2 not configured — fill in the four <code>R2_*</code> values in <code>.env</code> on the host.</p>
+      {% endif %}
+    </section>
+
+    <section>
       <h2>Parked clusters ({{ parked|length }})</h2>
       {% if parked %}
       <table>

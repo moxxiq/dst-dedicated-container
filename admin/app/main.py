@@ -515,15 +515,17 @@ def r2_env_ready(env: dict[str, str]) -> bool:
     )
 
 
-def run_backup(tag: str = "manual") -> tuple[bool, str]:
-    env = read_env_file()
-    if not r2_env_ready(env):
-        return False, "R2 env vars not set in .env"
-    if not cluster_is_ready():
-        return False, f"Cluster '{CLUSTER_NAME}' not provisioned yet"
+def r2_rclone_env(env: dict[str, str]) -> dict[str, str]:
+    """Build the env dict to pass to subprocess.run() for any rclone call
+    against R2. Mirrors the entrypoint's r2_rclone_env in shape.
 
-    rclone_env = os.environ.copy()
-    rclone_env.update(
+    NO_CHECK_BUCKET=true is critical: rclone normally probes the bucket on
+    first use (HEAD/PUT at /<bucket>) which Cloudflare R2 tokens scoped to
+    "Object Read & Write" don't have permission for, returning a stripped
+    403 that propagates as a confusing AccessDenied with empty request id.
+    """
+    out = os.environ.copy()
+    out.update(
         {
             "RCLONE_CONFIG_R2_TYPE": "s3",
             "RCLONE_CONFIG_R2_PROVIDER": "Cloudflare",
@@ -531,8 +533,20 @@ def run_backup(tag: str = "manual") -> tuple[bool, str]:
             "RCLONE_CONFIG_R2_SECRET_ACCESS_KEY": env["R2_SECRET_ACCESS_KEY"],
             "RCLONE_CONFIG_R2_ENDPOINT": f"https://{env['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
             "RCLONE_CONFIG_R2_REGION": "auto",
+            "RCLONE_CONFIG_R2_NO_CHECK_BUCKET": "true",
         }
     )
+    return out
+
+
+def run_backup(tag: str = "manual") -> tuple[bool, str]:
+    env = read_env_file()
+    if not r2_env_ready(env):
+        return False, "R2 env vars not set in .env"
+    if not cluster_is_ready():
+        return False, f"Cluster '{CLUSTER_NAME}' not provisioned yet"
+
+    rclone_env = r2_rclone_env(env)
 
     ts = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
     tmp = Path(f"/tmp/backup-{ts}-{tag}.tar.gz")
@@ -560,6 +574,106 @@ def run_backup(tag: str = "manual") -> tuple[bool, str]:
         except FileNotFoundError:
             pass
     return True, f"backup pushed ({ts}-{tag})"
+
+
+# ---- R2 cluster catalog (list / restore / park) ----
+
+def list_r2_clusters() -> list[dict]:
+    """Return clusters that have a latest.tar.gz under r2:<bucket>/clusters/.
+
+    Each entry: {"name": str, "size_mb": float, "mtime": "YYYY-MM-DD HH:MM"}.
+    Returns [] on any error (R2 not configured, network down, empty bucket)
+    so the dashboard can render gracefully even when R2 is misconfigured.
+    """
+    env = read_env_file()
+    if not r2_env_ready(env):
+        return []
+    bucket = env["R2_BUCKET"]
+    rclone_env = r2_rclone_env(env)
+    # `--dirs-only` lists immediate subdirs of clusters/, each is a cluster name.
+    proc = subprocess.run(
+        ["rclone", "lsjson", f"r2:{bucket}/clusters/", "--dirs-only"],
+        capture_output=True, text=True, env=rclone_env, timeout=20,
+    )
+    if proc.returncode != 0:
+        return []
+    try:
+        dirs = json.loads(proc.stdout or "[]")
+    except json.JSONDecodeError:
+        return []
+    out: list[dict] = []
+    for d in dirs:
+        name = d.get("Name") or d.get("Path")
+        if not name:
+            continue
+        # stat the latest.tar.gz to fish out size + mtime in one call.
+        s = subprocess.run(
+            ["rclone", "lsjson", f"r2:{bucket}/clusters/{name}/latest.tar.gz"],
+            capture_output=True, text=True, env=rclone_env, timeout=15,
+        )
+        if s.returncode != 0:
+            continue
+        try:
+            files = json.loads(s.stdout or "[]")
+        except json.JSONDecodeError:
+            continue
+        if not files:
+            continue
+        f = files[0]
+        size_mb = round(int(f.get("Size", 0)) / (1024 * 1024), 1)
+        mtime = (f.get("ModTime") or "")[:16].replace("T", " ")
+        out.append({"name": name, "size_mb": size_mb, "mtime": mtime})
+    out.sort(key=lambda x: x["name"])
+    return out
+
+
+def fetch_r2_cluster_to(name: str, dest_dir: Path) -> tuple[bool, str]:
+    """Download r2:<bucket>/clusters/<name>/latest.tar.gz and extract into
+    dest_dir. dest_dir must NOT already exist (caller's responsibility).
+    Returns (ok, message)."""
+    env = read_env_file()
+    if not r2_env_ready(env):
+        return False, "R2 env vars not set in .env"
+    bucket = env["R2_BUCKET"]
+    src = f"r2:{bucket}/clusters/{name}/latest.tar.gz"
+    rclone_env = r2_rclone_env(env)
+    tmp = Path(f"/tmp/r2-fetch-{os.getpid()}-{name}.tar.gz")
+    try:
+        proc = subprocess.run(
+            ["rclone", "copyto", src, str(tmp), "--quiet"],
+            capture_output=True, text=True, env=rclone_env, timeout=600,
+        )
+        if proc.returncode != 0:
+            return False, f"rclone copyto {src}: {proc.stderr.strip() or 'unknown error'}"
+        if not tmp.is_file() or tmp.stat().st_size == 0:
+            return False, f"downloaded archive is empty"
+        dest_dir.mkdir(parents=True)
+        with tarfile.open(tmp, "r:gz") as tar:
+            # Same path-traversal guards as the zip upload path.
+            for m in tar.getmembers():
+                p = Path(m.name)
+                if p.is_absolute() or ".." in p.parts:
+                    return False, f"unsafe entry in archive: {m.name}"
+            tar.extractall(dest_dir)
+        # Backups from entrypoint use `tar -C ... <CLUSTER_NAME>`, which
+        # produces a top-level <CLUSTER_NAME>/ directory inside the archive.
+        # Flatten that so dest_dir/cluster.ini is directly accessible.
+        children = [c for c in dest_dir.iterdir() if not c.name.startswith(".")]
+        if (
+            len(children) == 1
+            and children[0].is_dir()
+            and not (dest_dir / "cluster.ini").exists()
+        ):
+            inner = children[0]
+            for item in inner.iterdir():
+                shutil.move(str(item), str(dest_dir / item.name))
+            inner.rmdir()
+        return True, f"restored {name} ({tmp.stat().st_size // 1024} KiB)"
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +706,7 @@ def dashboard(request: Request, _: str = Depends(require_auth)) -> HTMLResponse:
             "shards": shard_status(),
             "dst": dst_status(),
             "parked": list_parked(),
+            "r2_clusters": list_r2_clusters(),
             "r2_ready": r2_env_ready(env),
             "adminlist": _read_text_or_empty(adminlist_path),
             "mods_setup": _read_text_or_empty(mods_setup_path),
@@ -797,6 +912,73 @@ def cluster_activate(
     shutil.move(str(parked), str(cd))
 
     podman("start", DST_CONTAINER)
+    return RedirectResponse("/", status_code=303)
+
+
+# ---- Cluster: R2 restore (replace active) ----
+
+@app.post("/cluster/r2-restore")
+def cluster_r2_restore(
+    cluster_name: str = Form(...),
+    _: str = Depends(require_auth),
+) -> RedirectResponse:
+    """Stop DST, archive the current active cluster (if any) into parked/,
+    download r2:<bucket>/clusters/<cluster_name>/latest.tar.gz, extract into
+    the active slot, restart DST. Mirror of activate-parked but for R2."""
+    name = safe_name(cluster_name)
+
+    # Stage download into a temp slot so a partial/broken archive doesn't
+    # leave us cluster-less. Move into place atomically once ready.
+    staging = SAVES_DIR / f".r2-staging-{os.getpid()}-{name}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    ok, msg = fetch_r2_cluster_to(name, staging)
+    if not ok:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        raise HTTPException(status_code=502, detail=msg)
+    if not (staging / "cluster.ini").is_file():
+        shutil.rmtree(staging, ignore_errors=True)
+        raise HTTPException(status_code=400, detail=f"R2 backup '{name}' has no cluster.ini after extract")
+
+    podman("stop", "-t", "90", DST_CONTAINER, timeout=120)
+
+    cd = cluster_dir()
+    if cd.exists():
+        ts = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        PARKED_DIR.mkdir(exist_ok=True)
+        archive = PARKED_DIR / f"{CLUSTER_NAME}-archived-{ts}"
+        shutil.move(str(cd), str(archive))
+
+    SAVES_DIR.mkdir(exist_ok=True)
+    shutil.move(str(staging), str(cd))
+
+    podman("start", DST_CONTAINER)
+    return RedirectResponse("/", status_code=303)
+
+
+# ---- Cluster: park a copy of an R2 backup (without activating) ----
+
+@app.post("/cluster/r2-park")
+def cluster_r2_park(
+    cluster_name: str = Form(...),
+    park_name: str = Form(""),
+    _: str = Depends(require_auth),
+) -> RedirectResponse:
+    """Download r2:<bucket>/clusters/<cluster_name>/latest.tar.gz into a new
+    parked/ slot. Caller can pick a different park_name to avoid colliding
+    with the live cluster name; defaults to the same name."""
+    src_name = safe_name(cluster_name)
+    dest_name = safe_name(park_name) if park_name else src_name
+    PARKED_DIR.mkdir(exist_ok=True)
+    dest = PARKED_DIR / dest_name
+    if dest.exists():
+        raise HTTPException(status_code=409, detail=f"Parked slot '{dest_name}' already exists")
+    ok, msg = fetch_r2_cluster_to(src_name, dest)
+    if not ok:
+        if dest.exists():
+            shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(status_code=502, detail=msg)
     return RedirectResponse("/", status_code=303)
 
 
