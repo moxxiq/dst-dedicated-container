@@ -22,6 +22,7 @@ container sees them immediately (saves/) or on next boot (mods/).
 
 from __future__ import annotations
 
+import configparser
 import io
 import json
 import os
@@ -264,6 +265,56 @@ def shard_status() -> dict[str, bool]:
         "master": (cd / "Master" / "server.ini").is_file(),
         "caves": (cd / "Caves" / "server.ini").is_file(),
     }
+
+
+# Default values for the template wizard form. Used when no active cluster
+# exists (fresh VPS, parked-only state). Once a cluster is provisioned the
+# wizard's render context overrides these from the live cluster.ini, so the
+# operator sees what the running game is actually configured with rather
+# than starting fresh inputs every visit.
+WIZARD_DEFAULTS: dict[str, Any] = {
+    "cluster_name": CLUSTER_NAME,
+    "password": CLUSTER_NAME,           # matches the original hardcoded HTML default
+    "max_players": 6,
+    "game_mode": "relaxed",
+    "pvp": False,
+    "description": "Friendly cooperative world.",
+}
+
+
+def read_active_cluster_settings() -> dict[str, Any]:
+    """Read cluster.ini of the active cluster (if present) and return a dict
+    in the shape WIZARD_DEFAULTS expects, so we can prefill the form with
+    live values once the cluster has been provisioned. Missing keys fall
+    back to the defaults; missing/unreadable file returns defaults wholesale."""
+    out = dict(WIZARD_DEFAULTS)
+    cd = cluster_dir()
+    ini_path = cd / "cluster.ini"
+    if not ini_path.is_file():
+        return out
+    cp = configparser.ConfigParser(strict=False, interpolation=None)
+    try:
+        cp.read(ini_path, encoding="utf-8")
+    except (configparser.Error, OSError):
+        return out
+    g = cp["GAMEPLAY"] if "GAMEPLAY" in cp else {}
+    n = cp["NETWORK"] if "NETWORK" in cp else {}
+    if "game_mode" in g:
+        out["game_mode"] = g["game_mode"].strip()
+    if "max_players" in g:
+        try:
+            out["max_players"] = int(g["max_players"].strip())
+        except ValueError:
+            pass
+    if "pvp" in g:
+        out["pvp"] = g["pvp"].strip().lower() == "true"
+    if "cluster_password" in n:
+        out["password"] = n["cluster_password"].strip()
+    if "cluster_description" in n:
+        out["description"] = n["cluster_description"].strip()
+    if "cluster_name" in n:
+        out["cluster_name"] = n["cluster_name"].strip() or out["cluster_name"]
+    return out
 
 
 def list_parked() -> list[dict[str, Any]]:
@@ -708,6 +759,7 @@ def dashboard(request: Request, _: str = Depends(require_auth)) -> HTMLResponse:
             "parked": list_parked(),
             "r2_clusters": list_r2_clusters(),
             "r2_ready": r2_env_ready(env),
+            "wizard": read_active_cluster_settings(),
             "adminlist": _read_text_or_empty(adminlist_path),
             "mods_setup": _read_text_or_empty(mods_setup_path),
             "modoverrides_master": _read_text_or_empty(cd / "Master" / "modoverrides.lua"),

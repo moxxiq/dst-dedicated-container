@@ -79,20 +79,27 @@
 
     <section>
       <h2>Template wizard</h2>
+      <p class="muted">
+        {% if cluster_ready %}
+        Pre-filled from the live cluster's <code>cluster.ini</code>. Editing fields and submitting with target=<em>active</em> will replace the running cluster (DST gets stopped → new files written → DST started). Submit with target=<em>parked</em> to save a snapshot of these settings without touching the live game.
+        {% else %}
+        No active cluster yet — defaults shown. Submit to create one.
+        {% endif %}
+      </p>
       <form method="post" action="/cluster/template">
-        <label>Cluster name <input name="cluster_name" value="{{ cluster_name }}" required /></label>
-        <label>Password <input name="password" value="{{ cluster_name }}" /></label>
-        <label>Max players <input type="number" name="max_players" value="6" min="1" max="64" /></label>
+        <label>Cluster name <input name="cluster_name" value="{{ wizard.cluster_name }}" required /></label>
+        <label>Password <input name="password" value="{{ wizard.password }}" /></label>
+        <label>Max players <input type="number" name="max_players" value="{{ wizard.max_players }}" min="1" max="64" /></label>
         <label>Game mode
           <select name="game_mode">
-            <option value="relaxed" selected>relaxed</option>
-            <option value="survival">survival</option>
-            <option value="endless">endless</option>
-            <option value="wilderness">wilderness</option>
+            <option value="relaxed"    {% if wizard.game_mode == 'relaxed' %}selected{% endif %}>relaxed</option>
+            <option value="survival"   {% if wizard.game_mode == 'survival' %}selected{% endif %}>survival</option>
+            <option value="endless"    {% if wizard.game_mode == 'endless' %}selected{% endif %}>endless</option>
+            <option value="wilderness" {% if wizard.game_mode == 'wilderness' %}selected{% endif %}>wilderness</option>
           </select>
         </label>
-        <label class="checkbox"><input type="checkbox" name="pvp" /> PvP</label>
-        <label>Description <input name="description" value="Friendly cooperative world." /></label>
+        <label class="checkbox"><input type="checkbox" name="pvp" {% if wizard.pvp %}checked{% endif %} /> PvP</label>
+        <label>Description <input name="description" value="{{ wizard.description }}" /></label>
         <label>Target
           <select name="target">
             <option value="active" {% if not cluster_exists %}selected{% endif %}>active (write now)</option>
