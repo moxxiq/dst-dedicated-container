@@ -30,8 +30,11 @@
 # (underground). Both are launched as separate DST processes from the same
 # cluster dir. Each has its own stdin FIFO (fd 3 for Master, fd 4 for Caves).
 #
-# Save backup trigger: inotifywait on BOTH Master/save and Caves/save
-# (close_write, recursive), 10-second debounce across both.
+# Save backup trigger: 60s poll loop that c_evals into the master shard's
+# stdin FIFO and parses TheWorld.state.cycles + #AllPlayers from server_log.
+# Backup fires only on day rollover or when the last player leaves. Graceful
+# shutdown also fires one final backup. History filenames are prefixed with
+# day-NNNN so they sort by in-game time, not just wall clock.
 #
 # Graceful shutdown: on SIGTERM/SIGINT, write `c_save()` then `c_shutdown(true)`
 # into both FIFOs, wait for both processes to exit, final R2 push.
@@ -53,7 +56,7 @@ MASTER_FIFO=/tmp/dst.master.stdin
 CAVES_FIFO=/tmp/dst.caves.stdin
 DST_BIN="$DST_DIR/bin64/dontstarve_dedicated_server_nullrenderer_x64"
 
-INOTIFY_PID=""
+POLLER_PID=""
 MASTER_PID=""
 CAVES_PID=""
 
@@ -211,6 +214,23 @@ do_wait_for_cluster() {
   log "cluster detected — proceeding with launch"
 }
 
+# Global state shared with the poll watcher. Updated by poll_step on each
+# successful c_eval round-trip; consumed by do_backup for filename composition.
+LAST_CYCLES=-1
+LAST_PLAYERS=-1
+
+# Compose the R2 history filename so day-prefixed entries sort lexicographically
+# in cycle order, while ad-hoc tags (manual, shutdown) keep the iso-timestamp
+# leading. Both shapes still embed the trigger tag for debugging.
+backup_history_name() {
+  local tag="$1" ts="$2"
+  if [[ $LAST_CYCLES -ge 0 ]]; then
+    printf 'day-%04d-%s-%s.tar.gz' "$LAST_CYCLES" "$ts" "$tag"
+  else
+    printf '%s-%s.tar.gz' "$ts" "$tag"
+  fi
+}
+
 do_backup() {
   local tag="${1:-auto}"
   # R2 is guaranteed configured by r2_require at launch. If an operator calls
@@ -230,35 +250,89 @@ do_backup() {
   rclone copyto "$tmp" "r2:$R2_BUCKET/clusters/$CLUSTER_NAME/latest.tar.gz" --quiet \
     || log "R2 latest upload failed"
   local ts; ts="$(date -u +%Y-%m-%dT%H%M%SZ)"
-  rclone copyto "$tmp" "r2:$R2_BUCKET/clusters/$CLUSTER_NAME/history/${ts}-${tag}.tar.gz" --quiet \
+  local hist; hist="$(backup_history_name "$tag" "$ts")"
+  rclone copyto "$tmp" "r2:$R2_BUCKET/clusters/$CLUSTER_NAME/history/${hist}" --quiet \
     || log "R2 history upload failed"
   rm -f "$tmp"
-  log "backup pushed to R2 (tag=$tag)"
+  log "backup pushed to R2 (tag=$tag day=${LAST_CYCLES})"
 }
 
-# Export so the subshell running inotifywait can call it.
-export -f do_backup r2_configured r2_rclone_env log
+# Export so subshells can call into these functions.
+export -f do_backup r2_configured r2_rclone_env log backup_history_name
 export CLUSTER_NAME CLUSTER_DIR KLEI_DIR R2_ACCOUNT_ID R2_BUCKET \
-       R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
+       R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY LAST_CYCLES LAST_PLAYERS
 
-start_inotify_watcher() {
+# Send a c_eval to the master shard via FIFO 3, then read the freshest
+# ADMINBPOLL: line out of master's server_log. Returns "cycles:players" on
+# stdout, or non-zero if the round-trip didn't complete (DST not ready, FIFO
+# closed, no fresh response). The Lua side guards against TheWorld being nil
+# (worldgen) and AllPlayers being undefined (early boot).
+poll_query_state() {
+  local log="$CLUSTER_DIR/Master/server_log.txt"
+  [[ -f "$log" ]] || return 1
+  # Use a uniqueness token so we ignore stale ADMINBPOLL lines from earlier polls.
+  local nonce; nonce="$(date +%s%N)"
+  local pre_lines; pre_lines=$(wc -l < "$log" 2>/dev/null || echo 0)
+  echo "c_eval([[print('ADMINBPOLL:${nonce}:'..tostring(TheWorld and TheWorld.state.cycles or -1)..':'..(_G['AllPlayers'] and #AllPlayers or 0))]])" >&3 2>/dev/null || return 1
+  # Wait up to ~6s for the response to land in the log.
+  local i
+  for i in 1 2 3 4 5 6; do
+    sleep 1
+    local line
+    line=$(tail -n 200 "$log" 2>/dev/null | grep -oE "ADMINBPOLL:${nonce}:-?[0-9]+:[0-9]+" | tail -1)
+    if [[ -n "$line" ]]; then
+      # strip "ADMINBPOLL:<nonce>:" prefix → "cycles:players"
+      echo "${line#ADMINBPOLL:${nonce}:}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# One iteration of the poll loop. Reads current state, decides whether the
+# transition since LAST_* warrants a backup, fires it, then commits the new
+# state into LAST_*.
+poll_step() {
+  local response cycles players reason
+  response=$(poll_query_state) || return 0
+  cycles=${response%:*}
+  players=${response#*:}
+  # -1 cycles means TheWorld not initialized yet (still in worldgen). Skip.
+  [[ "$cycles" == "-1" || -z "$cycles" || -z "$players" ]] && return 0
+
+  reason=""
+  if (( LAST_CYCLES < 0 )); then
+    : # First successful poll - just record, no backup.
+  elif (( cycles > LAST_CYCLES )); then
+    reason="day"
+  elif (( LAST_PLAYERS > 0 && players == 0 )); then
+    reason="empty"
+  fi
+
+  LAST_CYCLES=$cycles
+  LAST_PLAYERS=$players
+
+  if [[ -n "$reason" ]]; then
+    log "trigger: $reason (day=$cycles, players=$players)"
+    do_backup "$reason" || true
+  fi
+}
+
+start_save_poller() {
   # R2 presence is enforced by r2_require at launch — no soft-skip here.
-  # Watches both shards' save dirs; a write to either one schedules a single
-  # debounced backup of the whole cluster (Master + Caves are tarred together).
-  mkdir -p "$MASTER_SAVE_DIR" "$CAVES_SAVE_DIR"
-  (
-    timer_pid=""
-    inotifywait -m -e close_write -r "$MASTER_SAVE_DIR" "$CAVES_SAVE_DIR" 2>/dev/null \
-      | while read -r _ _ _; do
-          if [ -n "$timer_pid" ] && kill -0 "$timer_pid" 2>/dev/null; then
-            kill "$timer_pid" 2>/dev/null || true
-          fi
-          ( sleep 10 && do_backup auto ) &
-          timer_pid=$!
-        done
+  # Replaces the previous inotify-on-every-close_write watcher (~every save,
+  # so every minute or two of play). Now polls DST state every 60s and only
+  # fires a backup on day rollover or when the last player leaves. Big
+  # bandwidth + R2-history-bloat reduction at the cost of up to ~1 in-game
+  # day of replay on host crash. Graceful shutdown still calls do_backup so
+  # podman stop / SIGTERM never loses progress.
+  ( while true; do
+      sleep 60
+      poll_step
+    done
   ) &
-  INOTIFY_PID=$!
-  log "save watcher started (PID $INOTIFY_PID), debounce 10s, watching Master + Caves"
+  POLLER_PID=$!
+  log "save poller started (PID $POLLER_PID): 60s cadence, triggers=day-rollover|all-players-left"
 }
 
 # Send c_save() + c_shutdown(true) to a single shard by writing into its FIFO.
@@ -296,7 +370,7 @@ graceful_stop() {
   # Give both shards up to 60s to flush saves and exit on their own.
   wait_or_kill Master "${MASTER_PID:-}" 60
   wait_or_kill Caves  "${CAVES_PID:-}"  60
-  [ -n "${INOTIFY_PID:-}" ] && kill "$INOTIFY_PID" 2>/dev/null || true
+  [ -n "${POLLER_PID:-}" ] && kill "$POLLER_PID" 2>/dev/null || true
   do_backup shutdown || true
   exit 0
 }
@@ -337,7 +411,7 @@ launch_dst() {
   exec 3<> "$MASTER_FIFO"
   exec 4<> "$CAVES_FIFO"
 
-  start_inotify_watcher
+  start_save_poller
   trap graceful_stop TERM INT
 
   cd "$DST_DIR/bin64"
@@ -383,7 +457,7 @@ launch_dst() {
   wait "$CAVES_PID"  2>/dev/null; CAVES_RC=$?
   log "Master exited rc=$MASTER_RC, Caves exited rc=$CAVES_RC"
 
-  [ -n "${INOTIFY_PID:-}" ] && kill "$INOTIFY_PID" 2>/dev/null || true
+  [ -n "${POLLER_PID:-}" ] && kill "$POLLER_PID" 2>/dev/null || true
   # Best-effort crash-path backup.
   do_backup exit || true
   if [ "$MASTER_RC" -ne 0 ]; then exit "$MASTER_RC"; fi
