@@ -796,35 +796,63 @@ def server_restart(_: str = Depends(require_auth)) -> RedirectResponse:
 
 @app.post("/cluster/upload")
 async def cluster_upload(
-    zipfile_field: UploadFile = File(..., alias="zipfile"),
+    archive_field: UploadFile = File(..., alias="archive"),
     park_name: str = Form(...),
     _: str = Depends(require_auth),
 ) -> RedirectResponse:
+    """Park a cluster from an uploaded archive. Accepts both .zip and .tar.gz
+    (the latter matches the format we push to R2, so an operator can download
+    a backup from R2 and re-upload it here without re-zipping). Format is
+    detected by magic bytes, not by filename."""
     name = safe_name(park_name)
     dest = PARKED_DIR / name
     if dest.exists():
         raise HTTPException(status_code=409, detail=f"Parked slot '{name}' already exists")
 
-    raw = await zipfile_field.read()
+    raw = await archive_field.read()
     if not raw:
         raise HTTPException(status_code=400, detail="Empty upload")
 
-    try:
-        zf = zipfile.ZipFile(io.BytesIO(raw))
-    except zipfile.BadZipFile:
-        raise HTTPException(status_code=400, detail="Not a valid zip file")
-
-    # Protection: no path escaping ("../"), no absolute paths.
-    for n in zf.namelist():
-        p = Path(n)
-        if p.is_absolute() or ".." in p.parts:
-            raise HTTPException(status_code=400, detail=f"Unsafe zip entry: {n}")
+    is_zip = raw[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+    is_gz = raw[:2] == b"\x1f\x8b"
 
     dest.mkdir(parents=True)
-    zf.extractall(dest)
+    try:
+        if is_zip:
+            try:
+                zf = zipfile.ZipFile(io.BytesIO(raw))
+            except zipfile.BadZipFile:
+                raise HTTPException(status_code=400, detail="Not a valid zip file")
+            for n in zf.namelist():
+                p = Path(n)
+                if p.is_absolute() or ".." in p.parts:
+                    raise HTTPException(status_code=400, detail=f"Unsafe zip entry: {n}")
+            zf.extractall(dest)
+        elif is_gz:
+            try:
+                tf = tarfile.open(fileobj=io.BytesIO(raw), mode="r:gz")
+            except tarfile.TarError as exc:
+                raise HTTPException(status_code=400, detail=f"Not a valid tar.gz: {exc}")
+            for m in tf.getmembers():
+                p = Path(m.name)
+                if p.is_absolute() or ".." in p.parts:
+                    raise HTTPException(status_code=400, detail=f"Unsafe tar entry: {m.name}")
+            tf.extractall(dest)
+            tf.close()
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported archive format. Upload a .zip or .tar.gz "
+                       "(magic bytes PK… or 1F8B…).",
+            )
+    except HTTPException:
+        # Clean up partial extraction so the slot is reusable on retry.
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
 
-    # If the zip contains a single top-level folder (e.g. "my-world/"),
-    # flatten so dest/cluster.ini is directly under dest/.
+    # If the archive contains a single top-level folder (e.g. "my-world/" or
+    # "qkation-cooperative/" from an R2 tar), flatten so dest/cluster.ini is
+    # directly under dest/.
     children = [c for c in dest.iterdir() if not c.name.startswith(".")]
     if len(children) == 1 and children[0].is_dir() and not (dest / "cluster.ini").exists():
         inner = children[0]

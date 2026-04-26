@@ -104,13 +104,13 @@
     </section>
 
     <section>
-      <h2>Park a cluster (upload zip)</h2>
+      <h2>Park a cluster (upload zip or tar.gz)</h2>
       <form method="post" action="/cluster/upload" enctype="multipart/form-data">
         <label>Park name <input name="park_name" placeholder="my-world-backup" required /></label>
-        <label>Zip file <input type="file" name="zipfile" accept=".zip" required /></label>
+        <label>Archive <input type="file" name="archive" accept=".zip,.tar.gz,.tgz" required /></label>
         <button type="submit">Upload</button>
       </form>
-      <p class="muted">Zip should contain the cluster folder's contents: <code>cluster.ini</code>, <code>Master/server.ini</code>, <code>Caves/server.ini</code>, plus each shard's <code>worldgenoverride.lua</code>/<code>modoverrides.lua</code>. A single top-level folder is auto-flattened. Clusters missing the Caves shard will park but cannot activate — recreate via the template wizard.</p>
+      <p class="muted">Accepts <code>.zip</code> or <code>.tar.gz</code> (same format we push to R2 — download from R2 and re-upload here without re-zipping). Should contain the cluster folder's contents: <code>cluster.ini</code>, <code>Master/server.ini</code>, <code>Caves/server.ini</code>, plus each shard's <code>worldgenoverride.lua</code>/<code>modoverrides.lua</code>. A single top-level folder is auto-flattened. Clusters missing the Caves shard will park but cannot activate — recreate via the template wizard.</p>
     </section>
 
     <section>
