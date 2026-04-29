@@ -180,6 +180,35 @@ r2://<bucket>/
 
 ---
 
+## Working with the agent — anti-defensive prompting
+
+By training default the agent leans **defensive**: extra `try/except`, fallback paths for cases that can't actually happen, validation of internal trusted data, redundant null-checks. This produces busywork code and hides real bugs behind silent error-swallowing. See `potential_issues.md` for a catalog of where this happened on this repo.
+
+The user has noticed and explicitly granted permission to drop the defaults. **Phrases that worked**, and what they unlock:
+
+- *"it's okay to say that"* / *"good boy"* / *"nice"* — confirms an honest self-critique was wanted, not a defensive deflection. Future audits get sharper.
+- *"trust the input"* — drop input-validation guards on internal callers; only validate at system boundaries (HTTP forms, archive contents, external APIs).
+- *"let it crash"* / *"don't catch that"* — exception bubbles up; user wants to see real failures, not a fake-success redirect.
+- *"no fallback"* — when the agent's about to add a 3-path fallback chain "just in case", the user prefers one path that fails loudly.
+- *"don't import again"* / *"use the module-level X"* — pulls the agent off reflexive function-local imports.
+
+Concrete patterns the agent should NOT add to this codebase:
+- `try: X except Exception: pass` on internal calls. If `X` can fail, propagate.
+- `os.environ.copy()` when 2-3 specific keys would do.
+- `errors="ignore"` on text reads of files we just wrote ourselves.
+- `2>/dev/null` on commands where the stderr would be informative.
+- Filtering "junk" in places where junk shouldn't appear (the bug is upstream).
+- "Best-effort" silent retries that don't tell the user a step failed.
+
+Concrete patterns that ARE correct:
+- `try: tmp.unlink() except FileNotFoundError` in finally blocks where the temp may not have been created.
+- `shutil.rmtree(..., ignore_errors=True)` on partial-extraction cleanup whose goal is "leave the slot reusable".
+- Explicit fallback chains where the user has signed off on the alternative paths (e.g. autowire's pubkey discovery — six paths because we genuinely don't know where the key lives across Beszel versions).
+
+When in doubt, ask: **"what specific scenario does this protect against, and is it actually possible?"** If the honest answer is "I'm not sure, just being safe", strip it.
+
+---
+
 ## User preferences / corrections log (Phase 1 additions)
 
 - **2026-04-20** — Vultr Cloud Firewall only; do NOT install UFW. **Why:** user runs Vultr and already has their own firewall conventions at the cloud level. Two firewalls = more breakage surface. **How to apply:** `REQUIREMENTS.md`'s UFW recipe is for non-Vultr deployments; Phase 5 bootstrap script must NOT install or enable UFW.
