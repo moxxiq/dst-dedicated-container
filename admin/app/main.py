@@ -38,11 +38,10 @@ def _strip_archive_junk(root) -> None:
     """Remove __MACOSX/, .DS_Store, etc anywhere under `root`. Called after
     extracting an uploaded archive so a Mac/Windows-zipped backup behaves
     the same as a clean Linux tar."""
-    import shutil as _shutil
     for entry in list(root.rglob("*")):
         if entry.name in ARCHIVE_JUNK:
             if entry.is_dir():
-                _shutil.rmtree(entry, ignore_errors=True)
+                shutil.rmtree(entry, ignore_errors=True)
             else:
                 try:
                     entry.unlink()
@@ -54,7 +53,6 @@ def _flatten_single_top_dir(dest) -> None:
     """If `dest` contains exactly one real subdir (ignoring junk + dotfiles)
     and no cluster.ini at its own root, hoist that subdir's contents up. The
     DST cluster format wants cluster.ini directly under the parked slot."""
-    import shutil as _shutil
     children = [
         c for c in dest.iterdir()
         if not c.name.startswith(".") and c.name not in ARCHIVE_JUNK
@@ -66,7 +64,7 @@ def _flatten_single_top_dir(dest) -> None:
     ):
         inner = children[0]
         for item in inner.iterdir():
-            _shutil.move(str(item), str(dest / item.name))
+            shutil.move(str(item), str(dest / item.name))
         try:
             inner.rmdir()
         except OSError:
