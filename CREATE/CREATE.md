@@ -1,7 +1,6 @@
 # CREATE.md — recreating this from scratch
 
-How to rebuild a Don't Starve Together dedicated-server appliance with offsite backup, web admin, and metrics on a fresh Ubuntu VPS. Aimed at: someone forking this for a similar appliance, OR a future agent/contributor needing architectural orientation.
-
+How to rebuild a Don't Starve Together dedicated-server appliance with offsite backup, web admin on a fresh Ubuntu VPS. 
 Cross-references live in [`AGENTS.md`](AGENTS.md) (decision history) and [`potential_issues.md`](potential_issues.md) (currently latent bugs).
 
 ---
@@ -11,12 +10,10 @@ Cross-references live in [`AGENTS.md`](AGENTS.md) (decision history) and [`poten
 A single-VPS appliance with three sibling components:
 
 ```
-                 ┌─────────────────────────────────────────────────┐
-                 │  Ubuntu 22.04 / 24.04 VPS  (Vultr is reference) │
-                 │                                                 │
-   :8080 ───────▶│  dst-admin (FastAPI)  ◀──── controls ───┐       │
-   :8090 ───────▶│  beszel hub                             │       │
-   :45876 ←──── 127.0.0.1 ──── beszel-agent (host net)     │       │
+                 ┌──────────────────────────────────────────────────┐
+                 │   Ubuntu 22.04 / 24.04 VPS  (Vultr is reference) │
+                 │                                                  │
+   :8080 ───────▶│  dst-admin (FastAPI)  ◀──── controls  ───┐       │
                  │                                          │       │
                  │  ┌──────────────────────────┐            │       │
                  │  │  dst container           │ ◀── podman │       │
@@ -37,7 +34,6 @@ A single-VPS appliance with three sibling components:
 
 - **DST container** runs the Linux dedicated server binary (`app_id 343050`) plus a 476-line entrypoint that orchestrates update → mods sync → cluster restore → launch → poll-trigger backup → graceful stop.
 - **Admin panel** is a FastAPI single-page dashboard. Controls DST via the host's podman REST socket; edits cluster files through a shared bind mount; auto-refreshes status pills + log tails every 5 s.
-- **Beszel** is self-hosted hub + agent for VPS-wide metrics + per-container charts. Optional but bootstrap-installable.
 - **Bootstrap** is a single shell command that turns a fresh `ssh root@vps` into the running stack in ~10 minutes.
 
 ---
@@ -46,7 +42,7 @@ A single-VPS appliance with three sibling components:
 
 | What | Why | Where |
 | --- | --- | --- |
-| **Vultr Ubuntu 22.04 / 24.04 VPS, x86_64, ≥2 GB RAM** | DST idle ~1.2 GB; admin + Beszel ~200 MB. Steam binaries are glibc x86_64-only, so no ARM, no Alpine. | https://my.vultr.com |
+| **Vultr Ubuntu 22.04 / 24.04 VPS, x86_64, ≥2 GB RAM** | DST idle ~1.2 GB; admin . Steam binaries are glibc x86_64-only, so no ARM, no Alpine. | https://my.vultr.com |
 | **Klei cluster token** | DST dedicated server uses anonymous Steam login + a per-server token. | https://accounts.klei.com/account/game/servers → **Add New Server** → copy token |
 | **Cloudflare R2 bucket + Object R/W token** | All save backups + first-boot restore. R2 is **mandatory** — entrypoint exits on launch if any of `R2_ACCOUNT_ID/R2_BUCKET/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY` is empty. | https://dash.cloudflare.com → R2 → create bucket → "Manage R2 API Tokens" → token with **Object Read & Write** scope, applied to your bucket |
 
@@ -91,7 +87,6 @@ sudo ./bootstrap.sh --vars /root/bootstrap.vars     # absolute path, NOT ~/
 4. Clone repo into `/home/dst/steamCMD`, write `.env` from vars or prompts.
 5. Build DST image (`local/steamcmd:latest`), start DST via `./run-dst.sh start`.
 6. Build admin image, `podman-compose down && up -d` admin (down-first sweeps any zombies from a prior run).
-7. If `INSTALL_BESZEL=y`: pre-touch `monitoring/.env` (chicken-and-egg with autowire), `podman-compose down && up -d` Beszel, run `./autowire.sh` to fetch hub pubkey + register the local agent as a system.
 8. UFW: open 22, 8080, 8090, plus DST gameplay UDP (10999, 10998, 8766, 8768, 27016, 27018). Agent port 45876 is intentionally NOT opened — both ends run on `127.0.0.1`.
 9. Print summary with login URLs + unified credentials.
 
@@ -133,22 +128,6 @@ sudo ./bootstrap.sh --vars /root/bootstrap.vars     # absolute path, NOT ~/
 
 **Active-cluster wizard:** form values prefill from the live `cluster.ini` via `read_active_cluster_settings()` (`configparser`-based). Uses `WIZARD_DEFAULTS` when no active cluster exists.
 
-### Beszel (`monitoring/`)
-
-| File | Role |
-| --- | --- |
-| `docker-compose.yml` | Hub (henrygd/beszel) on `:8090`, agent (henrygd/beszel-agent) on `:45876` with `network_mode: host`. |
-| `autowire.sh` | Post-up zero-click pairing: auth against PocketBase API → fetch hub pubkey → write to `monitoring/.env` → register agent as a system. |
-
-**Pubkey discovery chain** (`autowire.sh` rebuilt for the umpteen-versions-of-Beszel reality):
-1. Authenticated `/api/beszel/getkey` (newer builds)
-2. Unauthenticated `/api/beszel/getkey` (older builds)
-3-8. Six known on-disk paths via `podman exec beszel cat`: `/beszel_data/id_ed25519.pub`, `/beszel_data/pb_data/...`, `/beszel_data/data/...`, `/beszel_data/keys/...`, `/data/...`, `/pb_data/...`
-9. Wide `find / -name id_ed25519.pub` as last resort
-
-Logs the source on success — future Beszel image moves the file? You'll see which path won and can trim the chain.
-
-**Agent restart needs `XDG_RUNTIME_DIR`:** `su -` doesn't always set it via PAM (Ubuntu's `su` PAM stack lacks `pam_systemd`). The compose `${XDG_RUNTIME_DIR:-/run/user/1000}` fallback is wrong on hosts where dst is UID 1001. `autowire.sh` re-exports it from `id -u` before invoking `podman-compose up -d agent`.
 
 ### Bootstrap (`bootstrap/vultr-bootstrap.sh`, 411 lines)
 
@@ -174,8 +153,6 @@ empty VPS
    ├── operator: zip/tar.gz upload ──▶ parked/<X>/      ◀── operator: Activate → moves to saves/
    └── operator: R2 restore ─────────▶ saves/<NAME>/    ◀── auto-launches
 ```
-
-DST's wait-for-cluster loop is inotify-driven (commit `7d89d9c`), not poll-sleep — files appear, DST launches in <1 s.
 
 ### Backup pipeline (current, post-`f7ebe26`)
 
@@ -236,8 +213,6 @@ r2://<bucket>/clusters/<NAME>/history/
     day-0002-….zip
     day-0002-….mods.json
     …
-    2026-04-26T1815Z-manual.zip
-    2026-04-26T1815Z-manual.mods.json
 ```
 
 Sidecar JSON is small (a few hundred bytes) — admin's "show mods" UI fetches it lazily via `/api/r2/mods/<cluster>/<sidecar>` rather than downloading the whole archive.
@@ -248,11 +223,10 @@ Sidecar JSON is small (a few hundred bytes) — admin's "show mods" UI fetches i
 
 ### Visible (operator-facing)
 
-- Status pills auto-refresh 5 s (DST state, shard ready/loading/booting/missing, R2 readiness, in-game uptime).
 - Server control: Start / Graceful stop / Restart / Backup to R2 now.
 - Live status: 3 log panes (entrypoint, Master, Caves), tail-and-poll.
-- Template wizard with prefill from live cluster.ini.
-- Park a cluster: zip OR tar.gz upload, magic-byte detected, single-wrapper-dir auto-flattened.
+- Template wizard
+- Park a cluster: zip OR tar.gz upload
 - Parked clusters: Activate / Delete, validation column.
 - R2 cloud backups: per-cluster newest summary + drill-in to history with show-mods toggle, per-row Restore + Park.
 - Adminlist: KU_ IDs, non-KU_ stripped on save.
@@ -261,17 +235,12 @@ Sidecar JSON is small (a few hundred bytes) — admin's "show mods" UI fetches i
 
 ### Hidden mechanics (not directly UI-visible)
 
-- **`--userns=keep-id:uid=1000,gid=1000`** — host dst (1001) → container ubuntu (1000). Without it, DST writes at subuid 166535 and admin writes at 1001; permission-denied loop. (commit `cbd7774`)
+- **`--userns=keep-id:uid=1000,gid=1000`** — host dst (1001) → container ubuntu (1000). Without it, DST writes at subuid 166535 and admin writes at 1001; permission-denied loop.
 - **Per-shard FIFO opened O_RDWR** — bash `exec 3<>` not `>`. O_WRONLY would block forever waiting for a reader. (commit `5f15fa1`)
-- **`do_mods_sync` recursively copies `mods/user-mods/`** into DST install — sideload pattern enables non-Workshop custom mods.
-- **`podman-api-dst.service` system unit**, not a user `podman.socket`. PAM doesn't always set up dbus for `su -` / sudo, so user systemd is unreliable. System unit + `User=dst` works regardless. (commit `c9bd761`)
-- **`podman-restart.service` enabled for the dst user** — `--restart unless-stopped` doesn't survive host reboots in rootless podman. With linger, this unit runs `podman start --all` on user systemd boot. (commit `b7887eb`)
 - **Mods sidecar JSON** next to each backup zip — workshop IDs greppped from `dedicated_server_mods_setup.lua` + both `modoverrides.lua`. UI lazy-fetches via `/api/r2/mods/...`.
-- **`ARCHIVE_JUNK` filter + `_strip_archive_junk()`** on every extract — removes `__MACOSX/`, `.DS_Store`, `Thumbs.db`, `desktop.ini` so Mac/Windows-zipped uploads don't break flatten. (commit `0970488`)
-- **`RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true`** in both entrypoint and admin — rclone normally probes the bucket with `PUT /<bucket>` (CreateBucket) on first use; R2 Object R/W tokens lack that scope, returning a stripped 403 with empty request id. (commit `56c77c9`)
-- **`set -a; . ../.env; set +a;`** subshell wrapping for every compose invocation — without it, parse-time `${ADMIN_PASSWORD:?}` substitution fails because `env_file:` only injects at runtime, not parse-time. (commit `2752162`)
-- **Wizard prefill from live cluster.ini** — `read_active_cluster_settings()` parses the active config, falls back to `WIZARD_DEFAULTS` if missing/unreadable.
-- **Compose `down` before `up -d`** in bootstrap — avoids podman-compose 1.0.6 falling back to `podman start <stale-container>` on name collision (which would start the OLD container with OLD bind mounts). (commit `e7c9e50`)
+- **`ARCHIVE_JUNK` filter + `_strip_archive_junk()`** on every extract — removes `__MACOSX/`, `.DS_Store`, `Thumbs.db`, `desktop.ini` so Mac/Windows-zipped uploads don't break flatten.
+- **`set -a; . ../.env; set +a;`** subshell wrapping for every compose invocation — without it, parse-time `${ADMIN_PASSWORD:?}` substitution fails because `env_file:` only injects at runtime, not parse-time
+- **Compose `down` before `up -d`** in bootstrap — avoids podman-compose 1.0.6 falling back to `podman start <stale-container>` on name collision (which would start the OLD container with OLD bind mounts)
 
 ---
 
@@ -281,7 +250,6 @@ These are load-bearing for "why is X like that today". Listed roughly chronologi
 
 | What broke | Symptom | Fix | Commit |
 | --- | --- | --- | --- |
-| `apt install podman` doesn't include `podman-compose` on Ubuntu 22.04 / 24.04 | `podman compose up -d` → command not found, OR external-provider error | Add `podman-compose` (dash, Python wrapper) to apt, use it everywhere | `5bbf599` |
 | Ubuntu 24.04 podman 4.9 defaults to `pasta` networking, package not pulled | `podman build` fails: `pasta: executable file not found` | Add `passt` to apt list | `bccd9d4` |
 | DST binary needs `libcurl-gnutls.so.4` at runtime | `cannot open shared object file` immediately on every launch → crash loop | Add `libcurl3-gnutls` to Dockerfile apt | `1720286` |
 | `exec 3>` on a FIFO blocks until a reader exists; we open the FIFO before launching DST | Entrypoint hangs at FIFO setup, container never reaches DST launch | Open with `exec 3<>` (O_RDWR) | `5f15fa1` |
@@ -289,10 +257,7 @@ These are load-bearing for "why is X like that today". Listed roughly chronologi
 | Rootless podman socket: `systemctl --user enable --now podman.socket` needs PAM dbus, which `su -` and sudo don't set up | Admin panel: `connection refused: unix:///run/podman/podman.sock` | System unit `podman-api-dst.service` running `podman system service` as dst user — no user dbus needed | `c9bd761` |
 | Compose bind-mount with non-existent source path: podman auto-creates as a directory | `bind() can't use a directory as a socket`, podman-api-dst.service crash-loops with exit 125 | `ExecStartPre=-/bin/rm -rf` (with `-rf`, not `-f`) before bind; fix existing dirs by hand | `e75dc72` |
 | Heredoc `<<UNIT` (unquoted) expands backticks as command substitution | `bash: line N: -: command not found` (cosmetic; comment text was lost in the unit file but Exec lines survived) | Remove backticks from comment, or use `<<'UNIT'` (but we need `${DST_USER}` to interpolate) | `bd976c3` |
-| podman-compose 1.0.6 hits name collision on `podman run`, falls back to `podman start <stale>` instead of recreating | "Fixed code" appears not to deploy because the live container still has OLD bind-mounts/env | `podman-compose down` before every `up -d` in bootstrap | `e7c9e50` |
-| Beszel agent service has `env_file: - .env` resolving to `monitoring/.env`; autowire.sh writes that file but only AFTER the first compose-up | Fresh-VPS first compose-up errors creating beszel-agent | `touch monitoring/.env` BEFORE compose-up; autowire fills it later | `e7c9e50` |
 | DST container `ubuntu` user (UID 1000) maps to host subuid 166535 by rootless default; admin container `root` maps to host dst (1001); files written by one user can't be written by the other | Activated parked cluster crash-loops with `cluster_token.txt: Permission denied` | `--userns=keep-id:uid=1000,gid=1000` aligns DST's container ubuntu with host dst | `cbd7774` |
-| rclone S3 backend probes destination bucket with `PUT /<bucket>` (CreateBucket) on first use | R2 Object R/W token lacks CreateBucket scope → 403 AccessDenied with empty request_id (Cloudflare strips headers on edge-rejected calls) | `RCLONE_CONFIG_R2_NO_CHECK_BUCKET=true` in entrypoint and admin | `56c77c9` |
 | `--restart unless-stopped` only honors the running podman; on host reboot rootless containers come up in `Created` state and stay there | Containers don't restart after `sudo reboot` | `systemctl --user --machine=dst@.host enable podman-restart.service` (with linger, this fires on host boot) | `b7887eb` |
 | macOS Finder's Compress feature embeds `__MACOSX/` metadata + `.DS_Store` files in zips; the flatten logic counts non-dot children and saw `[__MACOSX, real_folder]` → length 2 → skipped flattening | Uploaded clusters appear invalid (Master/Caves columns dashes) — files nested at `parked/<name>/<inner>/cluster.ini` instead of `parked/<name>/cluster.ini` | `_strip_archive_junk()` recursive walk + `_flatten_single_top_dir()` ignores `ARCHIVE_JUNK` when counting children | `0970488` |
 | Sticky podman-ps locks: an old `podman ps` invocation that never returned holds the sqlite db lock | New `podman ps` calls hang silently | `pkill -9 -f 'podman ps'` then retry. Worst case `sudo reboot` (clears all locks) | (no fix; documented in cheatsheet) |
@@ -303,12 +268,7 @@ These are load-bearing for "why is X like that today". Listed roughly chronologi
 
 ## 8. Currently latent bugs
 
-See `potential_issues.md` for the full catalog. Highest-priority ones:
-
-- **`mods_save` / `mods_upload` swallow restart errors silently** — user clicks "Save and restart DST", restart fails, user sees redirect-to-/ and assumes success.
-- **`read_active_cluster_settings` returns defaults on parse error silently** — corrupted cluster.ini → wizard shows defaults → user submits → overwrites real config with defaults. Data-loss risk.
-- 6 GitHub Dependabot warnings (2 high, 4 moderate) on the admin's `requirements.txt`. Never investigated.
-- Zero tests. Everything shipped in the last week is "I think this works".
+See `potential_issues.md` for the full catalog.
 
 ---
 
@@ -341,7 +301,7 @@ Compact decision matrix; full reasoning in `AGENTS.md`.
 Never break these without an explicit corrections-log entry in `AGENTS.md`:
 
 1. **R2 is mandatory** — entrypoint exits if any of the four R2 vars is empty. Saves, restores, and first-boot recovery all go through R2.
-2. **DST runs `--platform=linux/amd64`** unconditionally. ARM hosts emulate; x86_64 hosts no-op.
+2. **DST runs `--platform=linux/amd64`**
 3. **DST runs `--userns=keep-id:uid=1000,gid=1000`**. Don't drop this unless you also chown a million paths.
 4. **No `:U` flag on bind mounts shared with admin** (`saves/`, `mods/`, `parked/`, `..`). Admin's `:U` would re-chown the whole tree on every `up -d` and race DST writes.
 5. **`set -a; . .env; set +a;` before any `podman-compose` invocation** that needs `${VAR:?}` substitution. `env_file:` is runtime-only.
@@ -352,29 +312,3 @@ Never break these without an explicit corrections-log entry in `AGENTS.md`:
 10. **No new defensive code without justification** — see `AGENTS.md → Working with the agent — anti-defensive prompting`.
 
 ---
-
-## 11. Disaster recovery — recreate from absolute scratch
-
-Scenario: VPS is gone, repo is gone. You have just the four R2 keys + Klei token + `ADMIN_PASSWORD`.
-
-```bash
-# 1. New VPS
-ssh root@<new-vps>
-curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/vultr-bootstrap.sh -o bootstrap.sh
-curl -fsSL https://raw.githubusercontent.com/moxxiq/dst-dedicated-container/master/bootstrap/bootstrap.vars.example -o bootstrap.vars
-# 2. Fill bootstrap.vars with your keys + same CLUSTER_NAME as before
-$EDITOR bootstrap.vars
-chmod +x bootstrap.sh && sudo ./bootstrap.sh --vars /root/bootstrap.vars
-```
-
-The bootstrap completes; DST starts; the entrypoint's `do_wait_for_cluster` finds an empty saves dir, calls `do_r2_restore_once`, downloads the newest history archive from R2, extracts it. DST launches with the restored state. Total time: ~10 min build + ~1 min restore.
-
-If the GitHub repo itself is also gone: clone from any local checkout, push to a new remote, edit the bootstrap's `REPO_URL`. The bootstrap's only github.com dependency is the `git clone` of the repo source.
-
----
-
-## 12. Operations cheatsheet
-
-Lives at the top of `README.md` — restart / cold cycle / kill / rebuild commands per service, plus diagnostics for the common podman-ps-hangs and reboot-recovery scenarios. Pull it down and `less README.md` on the VPS for the live reference.
-
-Daily ops: `podman ps`, web UI at `:8080`, web UI at `:8090`, `podman logs --tail 60 dst`.
